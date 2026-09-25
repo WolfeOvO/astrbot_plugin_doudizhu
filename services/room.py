@@ -39,7 +39,6 @@ class Room:
         self.settled = False
         self.auto: Dict[str, bool] = {}    # uid -> 托管中
         self.bot_sender = mgr.sender
-        self._hand_sent: Dict[int, frozenset] = {}   # seat -> 上次发送的手牌指纹
 
     # ------------------------------------------------------------------
     # 发送
@@ -65,6 +64,10 @@ class Room:
 
     async def send_private_text(self, uid: str, text: str) -> bool:
         return await self.mgr.send_private_text(self.gid, uid, text)
+
+    async def send_private_hand(self, uid: str, text: str, path: str) -> bool:
+        """手牌「图文」一起发（同一条消息）。"""
+        return await self.mgr.send_private_hand(self.gid, uid, text, path)
 
     # ------------------------------------------------------------------
     # 定时器
@@ -178,21 +181,24 @@ class Room:
             else:
                 self.arm_timer()
                 await self.send_hand_to(seat)
-                counts = "\n".join(f"{q.name} {len(q.hand)}" for q in g.players)
+                counts = "\n".join(f"{q.name} {len(q.hand)}张" for q in g.players)
                 role_txt = "地主" if p.role == "landlord" else "农民"
                 prev = g._prev_combo()
                 if prev is not None:
                     last = next((r for r in reversed(g.history) if r.kind == "play"), None)
                     who = g.players[last.seat].name if last else ""
-                    need_txt = f"⚔️ 需大过：{prev.text()}（{who}）"
+                    need_txt = f"{C.fmt_cards(prev.cards)}（{who}）"
                 else:
-                    need_txt = "🆓 你先手出牌"
+                    need_txt = "🟢 本轮你先出（自由出牌）"
                 await self.send_group(
                     f"🎯 轮到 {p.name}（{role_txt}）出牌（{self.conf.get('timeout', 45)}s）\n\n"
                     f"📊 剩牌：\n{counts}\n\n"
-                    f"{need_txt}\n"
-                    f"💬 出牌：{pfx}出 34567 ｜ {pfx}出 对3 ｜ {pfx}出 王炸\n"
-                    f"💬 操作：{pfx}不出 ｜ {pfx}提示 ｜ {pfx}我的牌 ｜ {pfx}托管")
+                    f"{need_txt}\n\n"
+                    f"💬 出牌指令：{pfx}出 xxx\n"
+                    f"💬 操作：\n"
+                    f"{pfx}不出 - 本回合不出牌\n"
+                    f"{pfx}提示 - 私聊给予提示\n"
+                    f"{pfx}托管 - 机器代打，输了不负责")
         elif g.phase == PH_BID:
             seat = g.bid_turn
             p = g.players[seat]
@@ -201,8 +207,12 @@ class Room:
             else:
                 self.arm_timer()
                 await self.send_group(
-                    f"🎲 轮到 {p.name} 叫分（{self.conf.get('timeout', 45)}s）\n"
-                    f"💬 {pfx}叫分 1 ｜ {pfx}叫分 2 ｜ {pfx}叫分 3 ｜ {pfx}不叫")
+                    f"🎲 轮到 {p.name} 叫分（{self.conf.get('timeout', 45)}s）\n\n"
+                    f"💬 操作：\n"
+                    f"{pfx}叫分 1 - 叫 1 分\n"
+                    f"{pfx}叫分 2 - 叫 2 分\n"
+                    f"{pfx}叫分 3 - 叫 3 分\n"
+                    f"{pfx}不叫 - 本局不叫分")
         elif g.phase == PH_GRAB:
             seat = g.grab_turn
             if seat is not None:
@@ -212,8 +222,10 @@ class Room:
                 else:
                     self.arm_timer()
                     await self.send_group(
-                        f"🔥 轮到 {p.name} 抢地主（{self.conf.get('timeout', 45)}s）\n"
-                        f"💬 {pfx}抢（倍数×2）｜ {pfx}不抢")
+                        f"🔥 轮到 {p.name} 抢地主（{self.conf.get('timeout', 45)}s）\n\n"
+                        f"💬 操作：\n"
+                        f"{pfx}抢 - 抢地主（倍数 ×2）\n"
+                        f"{pfx}不抢 - 不抢")
         elif g.phase == PH_DOUBLE:
             seat = g.double_turn
             if seat is not None:
@@ -224,8 +236,11 @@ class Room:
                     self.arm_timer()
                     await self.send_group(
                         f"💰 轮到 {p.name} 加倍（{self.conf.get('timeout', 45)}s）"
-                        f"｜ 当前倍数 ×{g.multiplier}\n"
-                        f"💬 {pfx}加倍（×2）｜ {pfx}超级加倍（×4）｜ {pfx}不加倍")
+                        f"｜ 当前倍数 ×{g.multiplier}\n\n"
+                        f"💬 操作：\n"
+                        f"{pfx}加倍 - 加倍（×2）\n"
+                        f"{pfx}超级加倍 - 超级加倍（×4）\n"
+                        f"{pfx}不加倍 - 不加倍")
 
     async def tick_bot(self):
         """AI 行动（由定时器触发后调用）。"""
@@ -282,7 +297,6 @@ class Room:
         for pp, aa in zip(new_g.players, old_autos):
             pp.auto = aa
         self.game = new_g
-        self._hand_sent.clear()
         self.settled = False
         wild_txt = f"，癞子为 {next(iter(new_g.wild_ranks))}" if new_g.wild_ranks else ""
         await self.send_group(f"🔄 三家都不叫，重新发牌{wild_txt}")
@@ -295,8 +309,12 @@ class Room:
             self.arm_timer()
             pfx = self.mgr.cmd_prefix
             await self.send_group(
-                f"🎲 轮到 {p.name} 叫分（{conf.get('timeout', 45)}s）\n"
-                f"💬 {pfx}叫分 1 ｜ {pfx}叫分 2 ｜ {pfx}叫分 3 ｜ {pfx}不叫")
+                f"🎲 轮到 {p.name} 叫分（{conf.get('timeout', 45)}s）\n\n"
+                f"💬 操作：\n"
+                f"{pfx}叫分 1 - 叫 1 分\n"
+                f"{pfx}叫分 2 - 叫 2 分\n"
+                f"{pfx}叫分 3 - 叫 3 分\n"
+                f"{pfx}不叫 - 本局不叫分")
 
     async def _finish(self):
         if self.settled:
@@ -335,36 +353,55 @@ class Room:
     # ------------------------------------------------------------------
     # 私聊手牌
     # ------------------------------------------------------------------
+    def situation_text(self, seat: int) -> str:
+        """给某个玩家的「现在的情况」文本：手牌 + 需大过/自由出牌。"""
+        g = self.game
+        p = g.players[seat]
+        role_txt = {"landlord": "地主", "farmer": "农民", "": ""}.get(p.role, "")
+        bits = [f"🃏 你的手牌（{len(p.hand)} 张）"]
+        if role_txt:
+            bits.append(f"你是{role_txt}")
+        bits.append(f"第 {p.play_count} 手")
+        wild = next(iter(g.wild_ranks)) if g.wild_ranks else None
+        if wild:
+            bits.append(f"癞子 {wild}")
+        prev = g._prev_combo()
+        if prev is not None:
+            last = next((r for r in reversed(g.history) if r.kind == "play"), None)
+            who = f"（{g.players[last.seat].name}）" if last is not None else ""
+            need = f"⚔️ 需大过：{C.fmt_cards(prev.cards)}{who}"
+        elif g.phase == PH_PLAY:
+            need = "🟢 本轮你先出（自由出牌）"
+        else:
+            need = ""
+        blocks = [" · ".join(bits), C.fmt_cards(p.hand)]
+        if need:
+            blocks.append(need)
+        return "\n\n".join(blocks)
+
     async def send_hand_to(self, seat: int, force: bool = False):
+        """每轮都推送：同一条消息里「文字 + 手牌图片」（force 保留兼容参数）。"""
         g = self.game
         p = g.players[seat]
         if p.is_bot or p.auto:
             return
-        fp = frozenset(p.hand)
-        if not force and self._hand_sent.get(seat) == fp:
-            return
-        self._hand_sent[seat] = fp
         wild = next(iter(g.wild_ranks)) if g.wild_ranks else None
-        role_txt = {"landlord": "地主", "farmer": "农民", "": ""}.get(p.role, "")
-        subtitle_bits = []
-        if role_txt:
-            subtitle_bits.append(f"你是{role_txt}")
-        subtitle_bits.append(f"第 {p.play_count} 手")
-        if wild:
-            subtitle_bits.append(f"癞子 {wild}")
+        role_txt = {"landlord": "你是地主", "farmer": "你是农民", "": ""}.get(p.role, "")
+        subtitle_bits = [b for b in (role_txt, f"第 {p.play_count} 手",
+                                     (f"癞子 {wild}" if wild else "")) if b]
         try:
             path = render.render_hand(
                 p.hand, wild_rank=wild,
                 title=f"你的手牌（{len(p.hand)} 张）",
                 subtitle=" · ".join(subtitle_bits),
             )
-            ok = await self.send_private_image(p.uid, path)
+            ok = await self.send_private_hand(p.uid, self.situation_text(seat), path)
             render.cleanup(path)
             if not ok:
-                await self.send_group(f"⚠️ 发给 {p.name} 的手牌失败，可能未加好友；"
-                                      f"请发送「我的牌」重试")
+                await self.send_group(f"⚠️ 发给 {p.name} 的手牌失败（可能未允许私聊/临时会话）；"
+                                      f"可发送「我的牌」重试")
         except Exception as e:
-            logger.error(f"[斗地主] 手牌图失败: {e}", exc_info=True)
+            logger.error(f"[斗地主] 手牌推送失败: {e}", exc_info=True)
 
     async def broadcast_hands(self):
         for p in self.game.players:
@@ -394,6 +431,9 @@ class RoomManager:
 
     async def send_private_text(self, gid: str, uid: str, text: str) -> bool:
         return await self.sender.send_private_text(gid, uid, text)
+
+    async def send_private_hand(self, gid: str, uid: str, text: str, path: str) -> bool:
+        return await self.sender.send_private_hand(gid, uid, text, path)
 
     # ------------------------------------------------------------------
     def get_room(self, gid: str) -> Optional[Room]:

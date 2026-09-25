@@ -332,17 +332,7 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
             combo, err = P.choose(cs, wild_ranks, None)
             if combo is None or err:
                 continue
-            keep = [c for c in hand if c not in cs]
-            leftover = _leftover_singles(keep, wild_ranks)
-            is_bomb = combo.kind in (P.BOMB, P.ROCKET)
-            score = (
-                (100 if is_bomb else 0)                       # 不轻易首出炸弹
-                + leftover * 2                                 # 留牌散牌越少越好
-                - len(cs) * 0.3                                # 出得多一点好
-                + combo.main * 0.06                            # 小牌先走
-                + combo.wild_used * WILD_PENALTY               # 省癞子
-            )
-            scored.append((score, cs))
+            scored.append((_lead_score(cs, hand, wild_ranks, combo), cs))
         if not scored:
             # 兜底：出最小单张
             smallest = C.sort_cards(hand)[0]
@@ -351,11 +341,12 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
         return scored[0][1]
 
     # 跟牌
-    # 农民不压队友（除非自己一把走完）
+    # 农民不压队友（除非自己一把走完；或队友是地主上家且地主牌少需要顶）
     if role == "farmer" and last_role == "farmer":
         finish = [cs for cs in gen_responses(hand, wild_ranks, prev) if len(cs) == len(hand)]
         if finish:
             return finish[0]
+        # 队友已经很大了（比如出了 2 或王），别浪费自己的大牌去压
         return None
 
     resps = gen_responses(hand, wild_ranks, prev)
@@ -390,10 +381,25 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
         for cs, combo in normal:
             keep = [c for c in hand if c not in cs]
             leftover = _leftover_singles(keep, wild_ranks)
+            # 拆牌惩罚：优先用本来就散的牌跟，别拆对子/三张/顺子骨架
+            vals = {}
+            for c in cs:
+                r = C.card_rank(c)
+                vals[r] = vals.get(r, 0) + 1
+            structure_break = 0
+            for r, k in vals.items():
+                had = sum(1 for c in hand if C.card_rank(c) == r)
+                if had == 2 and k == 1:
+                    structure_break += 2.5      # 拆对子当单张
+                elif had == 3 and k <= 2:
+                    structure_break += 3.5      # 拆三张
+                elif had == 4 and k < 4 and combo.kind not in (P.BOMB, P.ROCKET):
+                    structure_break += 6.0      # 拆炸弹
             score = (
                 combo.main * 1.0
                 + combo.wild_used * WILD_PENALTY
                 + leftover * 0.8
+                + structure_break
             )
             if opp_low:
                 score -= combo.main * 0.5   # 对家要跑：尽量大
@@ -415,6 +421,35 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
         if urgent and bomb_card is not None:
             return bomb_card[0]
     return None
+
+
+def _lead_score(cs: List[str], hand: Sequence[str], wild_ranks: Set[str],
+                combo: P.Combo) -> float:
+    """首出候选评分：小牌先走、少留散牌、不拆炸弹/大牌、长牌型优先。"""
+    keep = [c for c in hand if c not in cs]
+    leftover = _leftover_singles(keep, wild_ranks)
+    is_bomb = combo.kind in (P.BOMB, P.ROCKET)
+    # 拆牌惩罚：首出时尽量别拆对子/三张
+    vals = {}
+    for c in cs:
+        r = C.card_rank(c)
+        vals[r] = vals.get(r, 0) + 1
+    structure_break = 0
+    for r, k in vals.items():
+        had = sum(1 for c in hand if C.card_rank(c) == r)
+        if k == 1 and had >= 2:
+            structure_break += 2.0
+        if k == 2 and had >= 3:
+            structure_break += 2.0
+    score = (
+        (100 if is_bomb else 0)                       # 不轻易首出炸弹
+        + leftover * 2                                 # 留牌散牌越少越好
+        - len(cs) * 0.3                                # 出得多一点好
+        + combo.main * 0.06                            # 小牌先走
+        + combo.wild_used * WILD_PENALTY               # 省癞子
+        + structure_break
+    )
+    return score
 
 
 def _best_bomb(bombs, hand, wild_ranks):

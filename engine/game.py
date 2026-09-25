@@ -338,7 +338,7 @@ class GameState:
             self._settle(winner_seat=seat)
             return combo, f"🎉 {p.name}（{role_txt}）出完了最后 {len(cards)} 张牌！"
         self.current = (seat + 1) % 3
-        counts = "\n".join(f"{q.name} {len(q.hand)}" for q in self.players)
+        counts = "\n".join(f"{q.name} {len(q.hand)}张" for q in self.players)
         return combo, (f"🃏 {p.name}（{role_txt}）\n"
                        f"出 {combo.text()}{bomb_line}\n\n"
                        f"📊 剩牌：\n{counts}")

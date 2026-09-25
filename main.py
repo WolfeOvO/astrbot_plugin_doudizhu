@@ -4,26 +4,27 @@
 - 3 人开局（群内上桌），人不够可用 AI 补位（人机模式：1真+2机 / 2真+1机 / 3机观战）
 - 完整规则：叫分→抢地主→加倍→出牌；单/对/三/三带/顺子/连对/飞机/四带二/炸弹/王炸
 - 癞子玩法（欢乐斗地主规则：软炸/硬炸/纯癞子炸、癞子不可代王）
-- 私聊/群临时会话发牌（手牌图片）；「我的牌」可重发
+- 私聊/群临时会话发牌：每轮私发「文字 + 手牌图片」（现在的情况：手牌/需大过/自由出牌）
 - 乐豆系统：底分×倍数结算、签到、救济金、乐豆榜、战绩
 - 群主/管理员配置：模式、底分、超时、人机开关
 - 超时托管：叫分/抢/加倍弃权，出牌不出，先手AI代出
 
 命令（唤醒前缀 #）：
   斗地主 / 斗地主帮助        — 帮助
-  上桌 [经典|癞子]           — 加入牌桌（凑满3人可含AI）
+  上桌 [经典|癞子|不洗牌|极速] — 加入牌桌（凑满3人可含AI）
   下桌                      — 离开牌桌
   人机                      — 机器人补位补满并开局
   开局                      — 房主/管理提前开局（不满3人自动AI补位）
   叫分 N / 不叫             — 叫分阶段
   抢 / 不抢                 — 抢地主阶段
   加倍 / 超级加倍 / 不加倍   — 加倍阶段（×2 / ×4 / 不加倍）
-  出 <牌> / 不出            — 出牌 （如：#出 34567 / #出 对3 / #出 王炸）
-  提示                      — AI 提示出牌
-  我的牌                    — 重发手牌图
+  出 <牌> / 不出            — 出牌 （例：#出 ♥2 或 #出 34567）
+  提示                      — 私聊给你出牌提示
+  托管 / 取消托管            — 交给 AI 代打 / 随时收回自己打
   乐豆 / 签到 / 救济金       — 经济系统
   乐豆榜                    — 排行榜
   战绩                      — 个人战绩
+  我的牌                    — 手动重发手牌（一般用不到）
   设置斗地主 <项> <值>        — 群主/管理配置（模式/底分/超时/人机/开关）
 """
 from __future__ import annotations
@@ -48,11 +49,11 @@ from .services import render
 from .services.room import Room, RoomManager
 
 PLUGIN_NAME = "astrbot_plugin_doudizhu"
-PLUGIN_VERSION = "v1.2.0"
+PLUGIN_VERSION = "v1.2.1"
 MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
 MODE_ALIASES = {"经典": "classic", "癞子": "leizi", "不洗牌": "noshuffle", "极速": "speed"}
 
-HELP_TEXT = """🃏 斗地主 v1.2.0 —— 完整欢乐斗地主玩法
+HELP_TEXT = """🃏 斗地主 v1.2.1 —— 完整欢乐斗地主玩法
 
 【基本流程】
 1. 发送「上桌」加入牌桌（满 3 人自动开始；不满时可加 AI）
@@ -67,9 +68,8 @@ HELP_TEXT = """🃏 斗地主 v1.2.0 —— 完整欢乐斗地主玩法
 · 叫分 1/2/3 · 不叫
 · 抢 / 不抢        — 抢地主阶段
 · 加倍 / 超级加倍 / 不加倍 — 加倍阶段（普通×2、超级×4）
-· 出 <牌> / 不出   — 出牌阶段（♠ 3 4 5 6 7 / 对3 / 三个4带5 / 王炸……）
-· 提示            — 不知道出什么？AI 给你提示
-· 我的牌          — 重发手牌图片到私聊/临时会话
+· 出 <牌> / 不出   — 出牌阶段（♠3 3 4 5 6 7 / 对3 / 三个4带5 / 王炸……）
+· 提示            — 不确定出什么？私聊给你答案
 · 托管 / 取消托管  — 交给 AI 代打 / 随时收回自己打
 · 乐豆 · 签到 · 救济金 · 乐豆榜 · 战绩
 · 设置斗地主 <项> <值> — 群主/管理员配置
@@ -174,6 +174,26 @@ class DoudizhuPlugin(Star):
                 return True
         except Exception as e:
             logger.warning(f"[斗地主] 私聊文本失败 {uid}: {e}")
+            return False
+
+    async def send_private_hand(self, gid: str, uid: str, text: str, path: str) -> bool:
+        """手牌「图文一起发」：同一条私聊消息里文字 + 图片。"""
+        try:
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            segs = [
+                {"type": "text", "data": {"text": text}},
+                {"type": "image", "data": {"file": f"base64://{b64}"}},
+            ]
+            try:
+                await self._bot_call("send_private_msg",
+                                     user_id=int(uid), group_id=int(gid), message=segs)
+                return True
+            except Exception:
+                await self._bot_call("send_private_msg", user_id=int(uid), message=segs)
+                return True
+        except Exception as e:
+            logger.warning(f"[斗地主] 私聊图文失败 {uid}: {e}")
             return False
 
     # ==================================================================
@@ -383,7 +403,7 @@ class DoudizhuPlugin(Star):
             f"🎮 对局开始！{MODE_NAMES.get(g.mode, g.mode)}场{wild_txt}{extra_txt}\n"
             f"👥 玩家：" + "、".join(f"{p.name}{'(AI)' if p.is_bot else ''}" for p in g.players) +
             f"\n💰 底分 {conf.get('base', 100)} 乐豆/分 · ⏱️ 超时 {conf.get('timeout', 45)}s\n"
-            f"📩 手牌将私发（没收到发「{pfx}我的牌」）· 不会玩可发「{pfx}斗地主帮助」")
+            f"📩 手牌与「现在的情况」每轮私发 · 不会玩可发「{pfx}斗地主帮助」")
         await room.broadcast_hands()
         await room._after_step("")
 
@@ -532,7 +552,7 @@ class DoudizhuPlugin(Star):
             return
         raw = str(content or "").strip()
         if not raw:
-            yield event.plain_result("用法：#出 34567 / #出 对3 / #出 王炸 …（不知道出啥可发「提示」）")
+            yield event.plain_result("用法：#出 + 要出的牌（例：#出 ♥2 或 #出 34567）")
             return
         hand = room.game.players[seat].hand
         cards, err = C.resolve(raw, hand)
@@ -594,7 +614,13 @@ class DoudizhuPlugin(Star):
             return
         combo, err = P.choose(sug, room.game.wild_ranks, room.game._prev_combo())
         txt = combo.text() if combo else C.fmt_cards(sug)
-        yield event.plain_result(f"💡 提示：{txt}\n直接回复：出 {''.join(C.card_rank(c) for c in sug)}")
+        pfx = self.mgr.cmd_prefix
+        tip = f"💡 提示：{txt}\n在群里发送：{pfx}出 {C.fmt_cards(sug)}"
+        ok = await room.send_private_text(self._uid(event), tip)
+        if ok:
+            yield event.plain_result("💡 提示已私聊发给你（别让别人看到～）")
+        else:
+            yield event.plain_result(tip)
 
     @filter.command("我的牌", alias={"手牌", "重发"})
     async def cmd_my_hand(self, event: AstrMessageEvent):
@@ -664,6 +690,29 @@ class DoudizhuPlugin(Star):
             room.arm_timer()   # 恢复人类正常超时
         await room.send_hand_to(seat, force=True)
         yield event.plain_result(f"🔙 {p.name} 收回托管，恢复手动出牌！")
+
+    @filter.command("结束", alias={"解散牌局", "结束牌局"})
+    async def cmd_end(self, event: AstrMessageEvent):
+        """结束当前牌局（流局，不计乐豆）。对局中的玩家或群管理可用。"""
+        try:
+            gid = self._gid(event)
+        except ValueError:
+            event.stop_event()
+            return
+        room = self._room(gid)
+        if not room:
+            yield event.plain_result("当前没有进行中的对局～")
+            return
+        uid = self._uid(event)
+        is_player = any(p.uid == uid for p in room.game.players)
+        if not is_player and not await self._is_group_admin(event):
+            yield event.plain_result("只有对局中的玩家或群管理可以结束牌局～")
+            return
+        room.cancel_timer()
+        self.mgr.finish_room(gid, room)
+        yield event.plain_result(f"🛑 {self._name(event)} 结束了本局（流局，不计乐豆）\n"
+                                 f"重新开局：发送「上桌」")
+        event.stop_event()
 
     # ==================================================================
     # 经济系统

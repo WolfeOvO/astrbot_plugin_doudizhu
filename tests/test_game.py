@@ -201,7 +201,7 @@ def test_super_double_and_messages():
     lp = g.players[g.landlord]
     c0 = C.sort_cards(lp.hand)[0]
     _, msg = g.play(g.landlord, [c0])
-    check("play msg role+counts", "（地主）" in msg and "📊 剩牌" in msg, msg)
+    check("play msg role+counts", "（地主）" in msg and "📊 剩牌" in msg and "张" in msg, msg)
     # 结算文案：真人显示乐豆增减，机器人显示 ∞
     g._settle(winner_seat=g.landlord)
     txt = g.settlement_text()
