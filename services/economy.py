@@ -30,7 +30,7 @@ DEFAULT_USER = {
 
 DEFAULT_GROUP = {
     "enabled": True,
-    "mode": "classic",     # classic / leizi
+    "mode": "classic",     # classic / leizi / noshuffle / speed
     "base": 100,           # 每 1 分底分对应乐豆
     "timeout": 45,         # 出牌/叫分超时秒数
     "allow_bot": True,     # 人不够时是否允许 AI 补位（人机模式）

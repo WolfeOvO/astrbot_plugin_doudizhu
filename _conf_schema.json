@@ -3,8 +3,8 @@
     "description": "新群的默认玩法模式",
     "type": "string",
     "default": "classic",
-    "options": ["classic", "leizi"],
-    "hint": "classic=经典场；leizi=癞子场（欢乐斗地主癞子玩法）"
+    "options": ["classic", "leizi", "noshuffle", "speed"],
+    "hint": "classic=经典场；leizi=癞子场；noshuffle=不洗牌（炸弹更多）；speed=极速（20s超时）"
   },
   "default_base": {
     "description": "新群默认底分（每 1 分对应乐豆）",
