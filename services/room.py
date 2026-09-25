@@ -106,8 +106,8 @@ class Room:
             seat = g.current
         if seat is None:
             return
-        # AI 行动者：直接走 AI 流程
-        if g.players[seat].is_bot:
+        # AI 行动者（真机器人或托管玩家）：直接走 AI 流程
+        if g.players[seat].is_bot or g.players[seat].auto:
             await self.tick_bot()
             return
         # 人类超时：叫分/抢/加倍=弃权；出牌=能不出就不出，先手则 AI 代出
@@ -120,7 +120,7 @@ class Room:
                 out = g.grab(seat, False)
                 action = "不抢"
             elif g.phase == PH_DOUBLE:
-                out = g.double(seat, False)
+                out = g.double(seat, 0)
                 action = "不加倍"
             elif g.phase == PH_PLAY:
                 prev = g._prev_combo()
@@ -169,41 +169,63 @@ class Room:
             await self._finish()
             return
 
+        pfx = self.mgr.cmd_prefix
         if g.phase == PH_PLAY:
             seat = g.current
             p = g.players[seat]
-            if p.is_bot:
+            if p.is_bot or p.auto:
                 self.arm_timer(2)   # AI 快速行动
             else:
                 self.arm_timer()
                 await self.send_hand_to(seat)
-                await self.send_group(f"🎯 轮到 {p.name} 出牌（{self.conf.get('timeout', 45)}s）")
+                counts = "\n".join(f"{q.name} {len(q.hand)}" for q in g.players)
+                role_txt = "地主" if p.role == "landlord" else "农民"
+                prev = g._prev_combo()
+                if prev is not None:
+                    last = next((r for r in reversed(g.history) if r.kind == "play"), None)
+                    who = g.players[last.seat].name if last else ""
+                    need_txt = f"⚔️ 需大过：{prev.text()}（{who}）"
+                else:
+                    need_txt = "🆓 你先手出牌"
+                await self.send_group(
+                    f"🎯 轮到 {p.name}（{role_txt}）出牌（{self.conf.get('timeout', 45)}s）\n\n"
+                    f"📊 剩牌：\n{counts}\n\n"
+                    f"{need_txt}\n"
+                    f"💬 出牌：{pfx}出 34567 ｜ {pfx}出 对3 ｜ {pfx}出 王炸\n"
+                    f"💬 操作：{pfx}不出 ｜ {pfx}提示 ｜ {pfx}我的牌 ｜ {pfx}托管")
         elif g.phase == PH_BID:
             seat = g.bid_turn
             p = g.players[seat]
-            if p.is_bot:
+            if p.is_bot or p.auto:
                 self.arm_timer(3)
             else:
                 self.arm_timer()
-                await self.send_group(f"🎲 轮到 {p.name} 叫分")
+                await self.send_group(
+                    f"🎲 轮到 {p.name} 叫分（{self.conf.get('timeout', 45)}s）\n"
+                    f"💬 {pfx}叫分 1 ｜ {pfx}叫分 2 ｜ {pfx}叫分 3 ｜ {pfx}不叫")
         elif g.phase == PH_GRAB:
             seat = g.grab_turn
             if seat is not None:
                 p = g.players[seat]
-                if p.is_bot:
+                if p.is_bot or p.auto:
                     self.arm_timer(3)
                 else:
                     self.arm_timer()
-                    await self.send_group(f"🔥 轮到 {p.name} 抢地主")
+                    await self.send_group(
+                        f"🔥 轮到 {p.name} 抢地主（{self.conf.get('timeout', 45)}s）\n"
+                        f"💬 {pfx}抢（倍数×2）｜ {pfx}不抢")
         elif g.phase == PH_DOUBLE:
             seat = g.double_turn
             if seat is not None:
                 p = g.players[seat]
-                if p.is_bot:
+                if p.is_bot or p.auto:
                     self.arm_timer(3)
                 else:
                     self.arm_timer()
-                    await self.send_group(f"💰 轮到 {p.name} 加倍")
+                    await self.send_group(
+                        f"💰 轮到 {p.name} 加倍（{self.conf.get('timeout', 45)}s）"
+                        f"｜ 当前倍数 ×{g.multiplier}\n"
+                        f"💬 {pfx}加倍（×2）｜ {pfx}超级加倍（×4）｜ {pfx}不加倍")
 
     async def tick_bot(self):
         """AI 行动（由定时器触发后调用）。"""
@@ -212,23 +234,23 @@ class Room:
             return
         if g.phase == PH_BID:
             seat = g.bid_turn
-            if not g.players[seat].is_bot:
+            if not (g.players[seat].is_bot or g.players[seat].auto):
                 return
             pts = AI.suggest_bid(g.players[seat].hand, g.wild_ranks, g._bid_current)
             out = g.bid(seat, pts)
         elif g.phase == PH_GRAB:
             seat = g.grab_turn
-            if seat is None or not g.players[seat].is_bot:
+            if seat is None or not (g.players[seat].is_bot or g.players[seat].auto):
                 return
             out = g.grab(seat, AI.suggest_grab(g.players[seat].hand, g.wild_ranks))
         elif g.phase == PH_DOUBLE:
             seat = g.double_turn
-            if seat is None or not g.players[seat].is_bot:
+            if seat is None or not (g.players[seat].is_bot or g.players[seat].auto):
                 return
             out = g.double(seat, AI.suggest_double(g.players[seat].hand, g.wild_ranks))
         elif g.phase == PH_PLAY:
             seat = g.current
-            if not g.players[seat].is_bot:
+            if not (g.players[seat].is_bot or g.players[seat].auto):
                 return
             p = g.players[seat]
             prev = g._prev_combo()
@@ -252,10 +274,13 @@ class Room:
         g = self.game
         old_players = [(p.uid, p.name) for p in g.players]
         old_bots = [p.is_bot for p in g.players]
+        old_autos = [bool(p.auto) for p in g.players]
         conf = self.conf
         from ..engine.game import GameState
         new_g = GameState(old_players, mode=g.mode,
                           base_per_point=int(conf.get("base", 100)), bots=old_bots)
+        for pp, aa in zip(new_g.players, old_autos):
+            pp.auto = aa
         self.game = new_g
         self._hand_sent.clear()
         self.settled = False
@@ -264,11 +289,14 @@ class Room:
         await self.broadcast_hands()
         seat = new_g.bid_turn
         p = new_g.players[seat]
-        if p.is_bot:
+        if p.is_bot or p.auto:
             self.arm_timer(3)
         else:
             self.arm_timer()
-            await self.send_group(f"🎲 轮到 {p.name} 叫分")
+            pfx = self.mgr.cmd_prefix
+            await self.send_group(
+                f"🎲 轮到 {p.name} 叫分（{conf.get('timeout', 45)}s）\n"
+                f"💬 {pfx}叫分 1 ｜ {pfx}叫分 2 ｜ {pfx}叫分 3 ｜ {pfx}不叫")
 
     async def _finish(self):
         if self.settled:
@@ -276,25 +304,33 @@ class Room:
         self.settled = True
         self.cancel_timer()
         g = self.game
-        await self.send_group(g.settlement_text())
-        # 乐豆结算 + 战绩
-        eco: Economy = self.mgr.economy
-        deltas = {uid: sc for uid, sc in g.score_deltas().items()
-                  if not uid.startswith("__bot")}
-        eco.settle(deltas)
-        for p in g.players:
-            if not p.is_bot:
-                eco.record_game(p.uid, p.is_winner, p.role == "landlord", g.multiplier)
-        # 结果图
-        lines = [f"{p.name}（{'地主' if p.role == 'landlord' else '农民'}）："
-                 f"{'+' if p.score >= 0 else ''}{p.score} 乐豆" for p in g.players]
         try:
-            path = render.render_result("对局结束", lines)
-            await self.send_group_image(path)
-            render.cleanup(path)
-        except Exception as e:
-            logger.warning(f"[斗地主] 结算图渲染失败: {e}")
-        self.mgr.finish_room(self.gid)
+            await self.send_group(g.settlement_text())
+            # 乐豆结算 + 战绩（机器人乐豆无限：不入账、不上榜）
+            eco: Economy = self.mgr.economy
+            deltas = {p.uid: p.score for p in g.players if not p.is_bot}
+            eco.settle(deltas)
+            for p in g.players:
+                if not p.is_bot:
+                    eco.record_game(p.uid, p.is_winner, p.role == "landlord",
+                                    g.multiplier, name=p.name)
+            # 结果图
+            lines = []
+            for p in g.players:
+                role = "地主" if p.role == "landlord" else "农民"
+                if p.is_bot:
+                    lines.append(f"{p.name}（{role}）：∞ 乐豆")
+                else:
+                    lines.append(f"{p.name}（{role}）："
+                                 f"{'+' if p.score >= 0 else ''}{p.score} 乐豆")
+            try:
+                path = render.render_result("对局结束", lines)
+                await self.send_group_image(path)
+                render.cleanup(path)
+            except Exception as e:
+                logger.warning(f"[斗地主] 结算图渲染失败: {e}")
+        finally:
+            self.mgr.finish_room(self.gid, self)
 
     # ------------------------------------------------------------------
     # 私聊手牌
@@ -302,7 +338,7 @@ class Room:
     async def send_hand_to(self, seat: int, force: bool = False):
         g = self.game
         p = g.players[seat]
-        if p.is_bot:
+        if p.is_bot or p.auto:
             return
         fp = frozenset(p.hand)
         if not force and self._hand_sent.get(seat) == fp:
@@ -344,6 +380,7 @@ class RoomManager:
         self.sender = sender          # 需实现 send_group/send_group_image/send_private_*
         self.bot = None
         self.msg_origins: Dict[str, str] = {}
+        self.cmd_prefix = ""          # 唤醒前缀（由插件注入，用于提示文案）
 
     # 发送通道代理（Room 调用）
     async def send_group(self, gid: str, text: str):
@@ -365,12 +402,21 @@ class RoomManager:
             return None
         return room
 
-    def finish_room(self, gid: str):
+    def finish_room(self, gid: str, room: Optional["Room"] = None):
+        """结束房间。指定 room 时仅当仍是同一个房间才移除（防止误删新开的局）。"""
+        cur = self.rooms.get(gid)
+        if room is not None and cur is not None and cur is not room:
+            return
         self.rooms.pop(gid, None)
 
     def create_room(self, gid: str, players: Sequence[tuple], mode: str,
                     bots: Sequence[bool], msg_origin: str, bot) -> Room:
+        old = self.rooms.get(gid)
+        if old is not None:
+            old.cancel_timer()   # 一群一局：兜底清理残留定时器（正常流程不会走到）
         conf = self.economy.group_conf(gid)
+        if mode == "speed":
+            conf = dict(conf, timeout=20)   # 极速场：20 秒超时
         g = GameState(players, mode=mode, base_per_point=int(conf.get("base", 100)), bots=bots)
         room = Room(gid, self, g, conf)
         room.msg_origin = msg_origin

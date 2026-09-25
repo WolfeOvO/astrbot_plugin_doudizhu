@@ -17,7 +17,7 @@
   开局                      — 房主/管理提前开局（不满3人自动AI补位）
   叫分 N / 不叫             — 叫分阶段
   抢 / 不抢                 — 抢地主阶段
-  加倍 / 不加倍             — 加倍阶段
+  加倍 / 超级加倍 / 不加倍   — 加倍阶段（×2 / ×4 / 不加倍）
   出 <牌> / 不出            — 出牌 （如：#出 34567 / #出 对3 / #出 王炸）
   提示                      — AI 提示出牌
   我的牌                    — 重发手牌图
@@ -48,26 +48,29 @@ from .services import render
 from .services.room import Room, RoomManager
 
 PLUGIN_NAME = "astrbot_plugin_doudizhu"
-PLUGIN_VERSION = "v1.0.0"
+PLUGIN_VERSION = "v1.2.0"
+MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
+MODE_ALIASES = {"经典": "classic", "癞子": "leizi", "不洗牌": "noshuffle", "极速": "speed"}
 
-HELP_TEXT = """🃏 斗地主 v1.0.0 —— 完整欢乐斗地主玩法
+HELP_TEXT = """🃏 斗地主 v1.2.0 —— 完整欢乐斗地主玩法
 
 【基本流程】
 1. 发送「上桌」加入牌桌（满 3 人自动开始；不满时可加 AI）
-2. 叫分 → 抢地主 → 加倍 → 出牌
+2. 叫分 → 抢地主 → 加倍（×2 / 超级加倍×4）→ 出牌
 3. 地主先出，先出完手牌的一方获胜
 
 【常用命令】
-· 上桌 [经典|癞子]  — 加入（懒人推荐直接「上桌」）
+· 上桌 [经典|癞子|不洗牌|极速] — 加入（默认经典；不洗牌=炸弹更多💣；极速=20s超时）
 · 下桌            — 退出牌桌
 · 人机            — AI 补位并立刻开局（人不齐也能玩）
 · 开局            — 发起人/管理强制开局
 · 叫分 1/2/3 · 不叫
 · 抢 / 不抢        — 抢地主阶段
-· 加倍 / 不加倍    — 加倍阶段
+· 加倍 / 超级加倍 / 不加倍 — 加倍阶段（普通×2、超级×4）
 · 出 <牌> / 不出   — 出牌阶段（♠ 3 4 5 6 7 / 对3 / 三个4带5 / 王炸……）
 · 提示            — 不知道出什么？AI 给你提示
 · 我的牌          — 重发手牌图片到私聊/临时会话
+· 托管 / 取消托管  — 交给 AI 代打 / 随时收回自己打
 · 乐豆 · 签到 · 救济金 · 乐豆榜 · 战绩
 · 设置斗地主 <项> <值> — 群主/管理员配置
 
@@ -78,7 +81,7 @@ HELP_TEXT = """🃏 斗地主 v1.0.0 —— 完整欢乐斗地主玩法
 出 三连对 或 334455
 出 飞机带单 33344457
 出 王炸
-（花色可省略，癞子场只需说点数）"""
+（花色可省略，癞子场只需说点数；每轮轮到你时也会贴出可用指令）"""
 
 
 @register(PLUGIN_NAME, "Wolfe", "斗地主：完整欢乐斗地主玩法（乐豆/癞子/人机模式/群内发牌）", PLUGIN_VERSION,
@@ -87,13 +90,27 @@ class DoudizhuPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
         self.config = config or {}
-        self.data_dir = get_astrbot_plugin_data_path()
         import os
+        self.data_dir = os.path.join(get_astrbot_plugin_data_path(), PLUGIN_NAME)
         os.makedirs(self.data_dir, exist_ok=True)
         self.economy = Economy(self.data_dir)
         self.mgr = RoomManager(self.economy, sender=self)
+        self.mgr.cmd_prefix = self._wake_prefix()   # 命令提示文案用（如 #）
         self.pending: Dict[str, dict] = {}      # 上桌缓冲：gid -> {"uids":[], "names":[], "mode":}
         self._lock = asyncio.Lock()
+
+    def _wake_prefix(self) -> str:
+        """读取 AstrBot 唤醒前缀（用于轮次提示里的命令示例）。"""
+        try:
+            cfg = self.context.get_config()
+            if not hasattr(cfg, "get"):
+                return ""
+            prefs = cfg.get("wake_prefix") or []
+            if isinstance(prefs, str):
+                return prefs
+            return str(prefs[0]) if prefs else ""
+        except Exception:
+            return ""
 
     # ==================================================================
     # 发送通道（RoomManager.sender 的实现）
@@ -206,6 +223,13 @@ class DoudizhuPlugin(Star):
                 return p.seat
         return None
 
+    async def _unauto(self, room: Room, seat: int):
+        """玩家手动操作时自动收回托管。"""
+        p = room.game.players[seat]
+        if p.auto:
+            p.auto = False
+            await room.send_group(f"🔙 {p.name} 收回托管，恢复手动出牌！")
+
     # ==================================================================
     # 上桌 / 下桌
     # ==================================================================
@@ -226,7 +250,10 @@ class DoudizhuPlugin(Star):
             if self._seat_of(room, uid) is not None:
                 yield event.plain_result(f"{name} 已经在桌上啦～")
                 return
-            yield event.plain_result("本群已有一局进行中，等结束后再上桌吧～")
+            players = "、".join(
+                f"{q.name}{'(AI)' if q.is_bot else ''}" for q in room.game.players)
+            yield event.plain_result(
+                f"🎮 本群已有一局进行中（{players}），等结束后再上桌吧～")
             return
         beans = self.economy.beans(uid)
         if beans < int(conf.get("min_beans", 100)):
@@ -234,8 +261,12 @@ class DoudizhuPlugin(Star):
                                      f"签到或领救济金攒一攒吧～")
             return
         b = self.pending.setdefault(gid, {"uids": [], "names": [], "mode": conf.get("mode", "classic")})
-        if mode in ("经典", "癞子"):
-            b["mode"] = "classic" if mode == "经典" else "leizi"
+        if mode:
+            m = MODE_ALIASES.get(mode)
+            if not m:
+                yield event.plain_result("模式可选：经典 / 癞子 / 不洗牌 / 极速～")
+                return
+            b["mode"] = m
         if uid in b["uids"]:
             yield event.plain_result(f"{name} 已经坐好啦～还差 {3 - len(b['uids'])} 人")
             return
@@ -282,6 +313,9 @@ class DoudizhuPlugin(Star):
         if not conf.get("allow_bot", True):
             yield event.plain_result("本群已禁用 AI 补位～")
             return
+        if self._room(gid) is not None:
+            yield event.plain_result("🎮 本群已有一局进行中，等这局结束后再开新的吧～")
+            return
         b = self.pending.get(gid)
         if not b or not b["uids"]:
             yield event.plain_result("还没有人上桌呢，先发「上桌」吧～")
@@ -300,6 +334,9 @@ class DoudizhuPlugin(Star):
             gid = self._gid(event)
         except ValueError as e:
             yield event.plain_result(str(e))
+            return
+        if self._room(gid) is not None:
+            yield event.plain_result("🎮 本群已有一局进行中，等这局结束后再开新的吧～")
             return
         b = self.pending.get(gid)
         if not b or len(b["uids"]) < 2:
@@ -322,10 +359,17 @@ class DoudizhuPlugin(Star):
         yield event.plain_result("🃏 开局！")
 
     async def _start_game(self, gid: str, event: AstrMessageEvent):
+        # 一群一局：已有进行中的对局时拒绝开新局（正常流程不会走到，兜底保护）
+        if self.mgr.get_room(gid) is not None:
+            await self.mgr.send_group(gid, "🎮 本群已有一局进行中，打完后才能开新局哦～")
+            return
         b = self.pending.pop(gid, None)
         if not b:
             return
+        self.mgr.cmd_prefix = self._wake_prefix()
         conf = self.economy.group_conf(gid)
+        if b.get("mode") == "speed":
+            conf = dict(conf, timeout=20)   # 极速场：20 秒超时
         bots = [uid.startswith("__bot") for uid in b["uids"]]
         room = self.mgr.create_room(gid, list(zip(b["uids"], b["names"])),
                                     mode=b.get("mode", "classic"), bots=bots,
@@ -333,11 +377,13 @@ class DoudizhuPlugin(Star):
         self.mgr.bot = event.bot
         g = room.game
         wild_txt = f"，癞子为 {next(iter(g.wild_ranks))}" if g.wild_ranks else ""
+        extra_txt = "（炸弹更多💣）" if g.mode == "noshuffle" else ""
+        pfx = self.mgr.cmd_prefix
         await room.send_group(
-            f"🎮 对局开始！{'经典' if g.mode == 'classic' else '癞子'}场{wild_txt}\n"
-            f"玩家：" + "、".join(f"{p.name}{'(AI)' if p.is_bot else ''}" for p in g.players) +
-            f"\n底分 {conf.get('base', 100)} 乐豆/分 · 超时 {conf.get('timeout', 45)}s\n"
-            "机器人将私发各位手牌 📩")
+            f"🎮 对局开始！{MODE_NAMES.get(g.mode, g.mode)}场{wild_txt}{extra_txt}\n"
+            f"👥 玩家：" + "、".join(f"{p.name}{'(AI)' if p.is_bot else ''}" for p in g.players) +
+            f"\n💰 底分 {conf.get('base', 100)} 乐豆/分 · ⏱️ 超时 {conf.get('timeout', 45)}s\n"
+            f"📩 手牌将私发（没收到发「{pfx}我的牌」）· 不会玩可发「{pfx}斗地主帮助」")
         await room.broadcast_hands()
         await room._after_step("")
 
@@ -349,12 +395,15 @@ class DoudizhuPlugin(Star):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room or room.game.phase != PH_BID:
+            event.stop_event()
             return
         seat = self._seat_of(room, self._uid(event))
         if seat is None:
+            event.stop_event()
             return
         try:
             pts = int(points) if str(points).strip().isdigit() else None
@@ -363,19 +412,24 @@ class DoudizhuPlugin(Star):
         if pts is None:
             yield event.plain_result("用法：叫分 1 / 2 / 3（或「不叫」）")
             return
+        await self._unauto(room, seat)
         await self._do_bid(room, seat, pts)
+        event.stop_event()
 
     @filter.command("不叫")
     async def cmd_no_bid(self, event: AstrMessageEvent):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if room and room.game.phase == PH_BID:
             seat = self._seat_of(room, self._uid(event))
             if seat is not None:
+                await self._unauto(room, seat)
                 await self._do_bid(room, seat, 0)
+        event.stop_event()
 
     async def _do_bid(self, room: Room, seat: int, pts: int):
         try:
@@ -390,24 +444,30 @@ class DoudizhuPlugin(Star):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if room and room.game.phase == PH_GRAB:
             seat = self._seat_of(room, self._uid(event))
             if seat is not None:
+                await self._unauto(room, seat)
                 await self._do_grab(room, seat, True)
+        event.stop_event()
 
     @filter.command("不抢")
     async def cmd_no_grab(self, event: AstrMessageEvent):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if room and room.game.phase == PH_GRAB:
             seat = self._seat_of(room, self._uid(event))
             if seat is not None:
+                await self._unauto(room, seat)
                 await self._do_grab(room, seat, False)
+        event.stop_event()
 
     async def _do_grab(self, room: Room, seat: int, do: bool):
         try:
@@ -417,33 +477,35 @@ class DoudizhuPlugin(Star):
             return
         await room._after_step(out)
 
-    @filter.command("加倍", alias={"抢加倍"})
+    @filter.command("加倍", alias={"双倍"})
     async def cmd_double(self, event: AstrMessageEvent):
-        try:
-            gid = self._gid(event)
-        except ValueError:
-            return
-        room = self._room(gid)
-        if room and room.game.phase == PH_DOUBLE:
-            seat = self._seat_of(room, self._uid(event))
-            if seat is not None:
-                await self._do_double(room, seat, True)
+        await self._cmd_double_factor(event, 2)
+
+    @filter.command("超级加倍", alias={"超加倍"})
+    async def cmd_super_double(self, event: AstrMessageEvent):
+        await self._cmd_double_factor(event, 4)
 
     @filter.command("不加倍")
     async def cmd_no_double(self, event: AstrMessageEvent):
+        await self._cmd_double_factor(event, 0)
+
+    async def _cmd_double_factor(self, event: AstrMessageEvent, factor: int):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if room and room.game.phase == PH_DOUBLE:
             seat = self._seat_of(room, self._uid(event))
             if seat is not None:
-                await self._do_double(room, seat, False)
+                await self._unauto(room, seat)
+                await self._do_double(room, seat, factor)
+        event.stop_event()
 
-    async def _do_double(self, room: Room, seat: int, do: bool):
+    async def _do_double(self, room: Room, seat: int, factor: int):
         try:
-            out = room.game.double(seat, do)
+            out = room.game.double(seat, factor)
         except Exception as e:
             await room.send_group(f"❌ {e}")
             return
@@ -457,9 +519,11 @@ class DoudizhuPlugin(Star):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room or room.game.phase != PH_PLAY:
+            event.stop_event()
             return
         uid = self._uid(event)
         seat = self._seat_of(room, uid)
@@ -480,16 +544,20 @@ class DoudizhuPlugin(Star):
         except Exception as e:
             yield event.plain_result(f"❌ {e}")
             return
+        await self._unauto(room, seat)
         await room._after_step(msg)
+        event.stop_event()
 
     @filter.command("不出", alias={"过", "不要"})
     async def cmd_pass(self, event: AstrMessageEvent):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room or room.game.phase != PH_PLAY:
+            event.stop_event()
             return
         seat = self._seat_of(room, self._uid(event))
         if seat is None or seat != room.game.current:
@@ -500,16 +568,20 @@ class DoudizhuPlugin(Star):
         except Exception as e:
             yield event.plain_result(f"❌ {e}")
             return
+        await self._unauto(room, seat)
         await room._after_step(out)
+        event.stop_event()
 
     @filter.command("提示")
     async def cmd_hint(self, event: AstrMessageEvent):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room or room.game.phase != PH_PLAY:
+            event.stop_event()
             return
         seat = self._seat_of(room, self._uid(event))
         if seat is None or seat != room.game.current:
@@ -529,6 +601,7 @@ class DoudizhuPlugin(Star):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room:
@@ -546,16 +619,51 @@ class DoudizhuPlugin(Star):
         try:
             gid = self._gid(event)
         except ValueError:
+            event.stop_event()
             return
         room = self._room(gid)
         if not room:
+            event.stop_event()
             return
         seat = self._seat_of(room, self._uid(event))
         if seat is None:
+            event.stop_event()
             return
         p = room.game.players[seat]
-        p.is_bot = True
-        yield event.plain_result(f"🤖 {p.name} 开启托管，本局由机器人代打")
+        if p.auto:
+            yield event.plain_result(f"🤖 {p.name} 已经在托管中啦～发「取消托管」可收回")
+            return
+        p.auto = True
+        yield event.plain_result(
+            f"🤖 {p.name} 开启托管，本局由机器人代打\n（随时发「取消托管」收回）")
+
+    @filter.command("取消托管", alias={"收回托管", "自己打"})
+    async def cmd_unauto(self, event: AstrMessageEvent):
+        try:
+            gid = self._gid(event)
+        except ValueError:
+            event.stop_event()
+            return
+        room = self._room(gid)
+        if not room:
+            event.stop_event()
+            return
+        seat = self._seat_of(room, self._uid(event))
+        if seat is None:
+            event.stop_event()
+            return
+        p = room.game.players[seat]
+        if not p.auto:
+            yield event.plain_result(f"{p.name} 现在没有在托管哦～")
+            return
+        p.auto = False
+        g = room.game
+        turn = {PH_BID: g.bid_turn, PH_GRAB: g.grab_turn,
+                PH_DOUBLE: g.double_turn, PH_PLAY: g.current}.get(g.phase)
+        if turn == seat:
+            room.arm_timer()   # 恢复人类正常超时
+        await room.send_hand_to(seat, force=True)
+        yield event.plain_result(f"🔙 {p.name} 收回托管，恢复手动出牌！")
 
     # ==================================================================
     # 经济系统
@@ -600,7 +708,8 @@ class DoudizhuPlugin(Star):
             return
         lines = ["🏆 乐豆排行榜"]
         for i, (uid, u) in enumerate(top, 1):
-            lines.append(f"{i}. {uid}：{u.get('beans', 0)} 乐豆（{u.get('wins', 0)} 胜）")
+            shown = u.get("name") or uid
+            lines.append(f"{i}. {shown}：{u.get('beans', 0)} 乐豆（{u.get('wins', 0)} 胜）")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("战绩")
@@ -632,7 +741,7 @@ class DoudizhuPlugin(Star):
         if not raw:
             yield event.plain_result(
                 "⚙️ 当前设置：\n"
-                f"· 模式：{'经典' if conf['mode'] == 'classic' else '癞子'}\n"
+                f"· 模式：{MODE_NAMES.get(conf['mode'], conf['mode'])}\n"
                 f"· 底分：{conf['base']} 乐豆/分\n"
                 f"· 超时：{conf['timeout']}s\n"
                 f"· AI 补位：{'允许' if conf['allow_bot'] else '禁止'}\n"
@@ -648,7 +757,7 @@ class DoudizhuPlugin(Star):
             return
         k, v = parts[0], parts[1]
         mapping = {
-            "模式": ("mode", {"经典": "classic", "癞子": "leizi"}),
+            "模式": ("mode", MODE_ALIASES),
             "底分": ("base", None),
             "超时": ("timeout", None),
             "人机": ("allow_bot", {"开": True, "关": False, "允许": True, "禁止": False}),

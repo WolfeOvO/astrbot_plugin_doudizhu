@@ -86,9 +86,20 @@ def test_parse():
     check("王炸", C.tokenize("王炸") == [(None, '小王'), (None, '大王')])
     check("♠3♥4", C.tokenize("♠3♥4") == [('♠', '3'), ('♥', '4')])
     check("s3 h4", C.tokenize("s3 h4") == [('♠', '3'), ('♥', '4')])
+    check("对3", C.tokenize("对3") == [(None, '3'), (None, '3')])
+    check("一对A", C.tokenize("一对A") == [(None, 'A'), (None, 'A')])
+    check("三个4带5", C.tokenize("三个4带5") == [(None, '4')] * 3 + [(None, '5')])
+    check("三连对334455", C.tokenize("三连对334455") ==
+          [(None, '3'), (None, '3'), (None, '4'), (None, '4'), (None, '5'), (None, '5')])
+    check("四带两对 8888 99", C.tokenize("四带两对 8888 99") ==
+          [(None, '8')] * 4 + [(None, '9')] * 2)
     hand = ["♠3", "♥3", "♦3", "♣4", "小王"]
     got, err = C.resolve("333", hand)
     check("resolve 333", err is None and got == ["♠3", "♥3", "♦3"], f"{got} {err}")
+    got, err = C.resolve("对3", ["♠3", "♥3", "♣4"])
+    check("resolve 对3", err is None and got == ["♠3", "♥3"], f"{got} {err}")
+    got, err = C.resolve("三张3", ["♠3", "♥3", "♦3", "♣4"])
+    check("resolve 三张3", err is None and got == ["♠3", "♥3", "♦3"], f"{got} {err}")
     got, err = C.resolve("小王", hand)
     check("resolve 小王", got == ["小王"])
     got, err = C.resolve("♥4", hand)

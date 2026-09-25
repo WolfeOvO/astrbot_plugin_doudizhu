@@ -78,6 +78,8 @@ _SUIT_ALIASES = {
 }
 _CHINESE_SUITS = {"黑桃": "♠", "红桃": "♥", "方块": "♦", "梅花": "♣"}
 _PRE_REPLACE = (("王炸", "wW"), ("双王", "wW"), ("火箭", "wW"), ("俩王", "wW"))
+_STRIP_WORDS = ("三连对", "连对", "顺子", "飞机带对", "飞机带单", "飞机",
+                "三带二", "三带一", "四带两对", "四带二")
 _STRIP_CHARS = (" ", "\t", ",", "，", "、", "+", "＋", "；", ";", "-", "_")
 
 
@@ -112,11 +114,14 @@ def tokenize(text: str) -> List[Tuple[Optional[str], str]]:
     """把玩家输入解析成 [(花色|None, 点数), ...] 序列。
 
     支持: "34567"、"3 4 5 6 7"、"♠3♥4"、"s3 h4"、"小王 大王"、"10JQKA2"、
-          "黑桃3"、"王炸"/"双王"
+          "黑桃3"、"王炸"/"双王"、"对3"/"一对3"/"两3"（对子）、"三个4"/"三张4"、
+          "四个5"（炸弹）、"三连对"/"飞机带单"等描述词会被忽略。
     """
     s = str(text or "")
     for k, v in _PRE_REPLACE:
         s = s.replace(k, v)
+    for w in _STRIP_WORDS:
+        s = s.replace(w, "")
     s = s.replace("10", "t").replace("T", "t")
     for junk in _STRIP_CHARS:
         s = s.replace(junk, "")
@@ -143,6 +148,24 @@ def tokenize(text: str) -> List[Tuple[Optional[str], str]]:
             out.append((None, JOKER_BIG))
             i += 2
             continue
+        # 数量词前缀：对3 / 一对3 / 两3 / 两个4 / 三个4 / 三张4 / 四个5
+        mc, j = 0, None
+        if two == "一对":
+            mc, j = 2, i + 2
+        elif ch == "对":
+            mc, j = 2, i + 1
+        elif ch == "两":
+            mc, j = 2, i + 1
+            if s[j:j + 1] == "个":
+                j += 1
+        elif ch in ("三", "四") and s[i + 1:i + 2] in ("个", "张"):
+            mc, j = (3 if ch == "三" else 4), i + 2
+        if j is not None and j < n:
+            r, adv = _read_rank(s, j)
+            if r:
+                out.extend([(None, r)] * mc)
+                i = j + adv
+                continue
         if ch in _SUIT_ALIASES:
             suit = _SUIT_ALIASES[ch]
             i += 1

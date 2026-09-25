@@ -62,8 +62,14 @@ def suggest_grab(hand: Sequence[str], wild_ranks: Set[str]) -> bool:
     return hand_strength(hand, wild_ranks) >= 5.0
 
 
-def suggest_double(hand: Sequence[str], wild_ranks: Set[str]) -> bool:
-    return hand_strength(hand, wild_ranks) >= 4.5
+def suggest_double(hand: Sequence[str], wild_ranks: Set[str]) -> int:
+    """加倍建议（对齐欢乐斗地主：普通加倍×2 / 超级加倍×4）：0=不加倍, 2=加倍, 4=超级加倍。"""
+    s = hand_strength(hand, wild_ranks)
+    if s >= 7.5:
+        return 4
+    if s >= 4.5:
+        return 2
+    return 0
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, Optional
 
 DEFAULT_USER = {
-    "beans": 2000, "last_sign": "", "sign_streak": 0,
+    "name": "", "beans": 2000, "last_sign": "", "sign_streak": 0,
     "wins": 0, "losses": 0, "games": 0, "landlord_wins": 0,
     "farmer_wins": 0, "max_mult": 1, "last_relief": "",
 }
@@ -92,9 +92,12 @@ class Economy:
                 u["beans"] = max(0, int(u["beans"]) + int(delta))
             self.save()
 
-    def record_game(self, uid: str, won: bool, is_landlord: bool, mult: int):
+    def record_game(self, uid: str, won: bool, is_landlord: bool, mult: int,
+                    name: str = ""):
         with self._lock:
             u = self.user(uid)
+            if name:
+                u["name"] = name
             u["games"] += 1
             if won:
                 u["wins"] += 1
@@ -143,7 +146,8 @@ class Economy:
             return {"ok": True, "beans": u["beans"], "reward": reward}
 
     def leaderboard(self, top: int = 10):
-        users = self.data["users"]
+        users = {k: v for k, v in self.data["users"].items()
+                 if not str(k).startswith("__bot")}
         ranked = sorted(users.items(), key=lambda kv: -int(kv[1].get("beans", 0)))
         return ranked[:top]
 

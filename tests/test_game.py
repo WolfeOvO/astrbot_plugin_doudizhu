@@ -126,22 +126,26 @@ def test_game_flow():
     check("multiplier after grabs == 8", g.multiplier == 8, str(g.multiplier))
     check("double phase", g.phase == "doubling")
     check("landlord is last grabber", g.landlord == bidder)
-    # 加倍：地主加倍 → ×2 → 16
+    # 加倍：地主普通加倍 ×2 → 16（其余两家不加倍）
     lt = g.double_turn
     check("double starts at landlord", lt == g.landlord)
-    g.double(lt, True)
-    g.double(g.double_turn, False)
-    g.double(g.double_turn, False)
+    g.double(lt, 2)
+    g.double(g.double_turn, 0)
+    g.double(g.double_turn, 0)
     check("play phase", g.phase == "playing")
     check("multiplier == 16", g.multiplier == 16, str(g.multiplier))
     check("landlord has 20", len(g.players[g.landlord].hand) == 20)
     check("base points 1", g.base_points == 1)
 
-    # 出牌：地主出最小的单张，两家过 → 回到地主
+    # 出牌：地主出最小的单张，两家过 → 回到地主（播报带身份+剩余牌数）
     lp = g.players[g.landlord]
     c0 = C.sort_cards(lp.hand)[0]
-    g.play(g.landlord, [c0])
-    g.pass_turn(g.current)
+    _, msg = g.play(g.landlord, [c0])
+    check("play msg has role", "（地主）" in msg, msg)
+    check("play msg has counts", "📊 剩牌" in msg, msg)
+    check("play msg vertical", "\n出 " in msg and "📊 剩牌：\n" in msg, msg)
+    pmsg = g.pass_turn(g.current)
+    check("pass msg has role", "（农民）" in pmsg, pmsg)
     g.pass_turn(g.current)
     check("back to landlord", g.current == g.landlord and g.last_play is None)
     # 地主再出一手，非当前座位出牌应被拒
@@ -172,6 +176,38 @@ def test_grab_none():
     check("base points 2", g.base_points == 2)
 
 
+def test_super_double_and_messages():
+    print("[super double ×4 + rich messages]")
+    rng = random.Random(11)
+    bots = [False, True, True]
+    g = GameState([("u0", "A"), ("u1", "B"), ("u2", "C")], mode="classic",
+                  rng=rng, bots=bots)
+    g.bid(g.bid_turn, 1)
+    g.bid(g.bid_turn, 0)
+    g.bid(g.bid_turn, 0)
+    g.grab(g.grab_turn, False)
+    g.grab(g.grab_turn, False)
+    check("doubling phase", g.phase == "doubling")
+    lt = g.double_turn
+    check("double starts at landlord", lt == g.landlord)
+    m0 = g.multiplier
+    msg = g.double(lt, 4)
+    check("super double ×4", g.multiplier == m0 * 4, f"{g.multiplier} != {m0 * 4}")
+    check("msg mentions 超级加倍", "超级加倍" in msg and "×4" in msg, msg)
+    g.double(g.double_turn, 2)
+    g.double(g.double_turn, 0)
+    check("multiplier m0×8", g.multiplier == m0 * 8, str(g.multiplier))
+    # 出牌播报：身份 + 剩余牌数
+    lp = g.players[g.landlord]
+    c0 = C.sort_cards(lp.hand)[0]
+    _, msg = g.play(g.landlord, [c0])
+    check("play msg role+counts", "（地主）" in msg and "📊 剩牌" in msg, msg)
+    # 结算文案：真人显示乐豆增减，机器人显示 ∞
+    g._settle(winner_seat=g.landlord)
+    txt = g.settlement_text()
+    check("settlement rich+∞", "本局结束" in txt and "∞ 乐豆" in txt and "乐豆" in txt, txt)
+
+
 def test_illegal_moves():
     print("[illegal move guards]")
     rng = random.Random(7)
@@ -190,13 +226,13 @@ def test_illegal_moves():
 
 
 def test_fuzz():
-    print("[fuzz 300 games]")
+    print("[fuzz 450 games]")
     wins_l = 0
     total = 0
     springs = 0
     max_mult = 1
     for seed in range(150):
-        for mode in ("classic", "leizi"):
+        for mode in ("classic", "leizi", "noshuffle"):
             r = play_full_game(seed, mode)
             total += 1
             if r["winner_landlord"]:
@@ -206,7 +242,7 @@ def test_fuzz():
             max_mult = max(max_mult, r["multiplier"])
             if not r["score_sum_zero"]:
                 check(f"zero-sum seed={seed} {mode}", False, str(r["scores"]))
-    check(f"{total} games completed", total == 300, f"got {total}")
+    check(f"{total} games completed", total == 450, f"got {total}")
     check("score zero-sum all", all(True for _ in []))
     print(f"   地主胜率 {wins_l}/{total}，春天 {springs}，最高倍数 {max_mult}")
 
@@ -221,9 +257,45 @@ def test_ai_hint():
     check("hint legal", combo is not None and err is None, f"{sug} {err}")
 
 
+def test_noshuffle_and_auto():
+    print("[noshuffle deal + auto(托管) 标记]")
+    total_bombs = 0
+    for seed in range(30):
+        g = GameState([("u0", "A"), ("u1", "B"), ("u2", "C")], mode="noshuffle",
+                      rng=random.Random(seed))
+        allc = [c for p in g.players for c in p.hand] + list(g.bottom)
+        assert len(allc) == 54 and len(set(allc)) == 54, "noshuffle 发牌张数/唯一性"
+        for p in g.players:
+            cnt = {}
+            for c in p.hand:
+                k = C.card_rank(c)
+                cnt[k] = cnt.get(k, 0) + 1
+            total_bombs += sum(1 for v in cnt.values() if v == 4)
+    check("noshuffle 炸弹频出", total_bombs >= 5, f"total={total_bombs}")
+
+    # 托管：不影响 is_bot / 结算显示实际乐豆 / 机器人仍 ∞
+    g2 = GameState([("u0", "KD"), ("b1", "机器人乙"), ("b2", "机器人丙")],
+                   mode="classic", rng=random.Random(7), bots=[False, True, True])
+    check("auto 默认关", g2.players[0].auto is False)
+    g2.players[0].auto = True
+    check("托管不改 is_bot", g2.players[0].is_bot is False)
+    for p, role in zip(g2.players, ("farmer", "landlord", "farmer")):
+        p.role = role
+    g2.landlord = 1
+    g2.base_points = 1
+    g2.multiplier = 1
+    g2.players[1].play_count = 5   # 避免反春天
+    g2._settle(winner_seat=2)
+    txt = g2.settlement_text()
+    check("托管人显示实际乐豆", "KD（农民）：+100 乐豆" in txt, txt)
+    check("机器人仍显示 ∞", txt.count("∞ 乐豆") == 2, txt)
+
+
 if __name__ == "__main__":
     test_game_flow()
     test_grab_none()
+    test_super_double_and_messages()
+    test_noshuffle_and_auto()
     test_illegal_moves()
     test_ai_hint()
     test_fuzz()
