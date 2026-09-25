@@ -1,0 +1,29 @@
+{
+  "default_mode": {
+    "description": "新群的默认玩法模式",
+    "type": "string",
+    "default": "classic",
+    "options": ["classic", "leizi"],
+    "hint": "classic=经典场；leizi=癞子场（欢乐斗地主癞子玩法）"
+  },
+  "default_base": {
+    "description": "新群默认底分（每 1 分对应乐豆）",
+    "type": "int",
+    "default": 100
+  },
+  "default_timeout": {
+    "description": "新群默认超时秒数（叫分/抢地主/加倍/出牌均适用）",
+    "type": "int",
+    "default": 45
+  },
+  "enable_bot_fill": {
+    "description": "全局允许 AI 补位（人机模式）",
+    "type": "bool",
+    "default": true
+  },
+  "welcome_beans": {
+    "description": "新玩家初始乐豆",
+    "type": "int",
+    "default": 2000
+  }
+}
