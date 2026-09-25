@@ -13,8 +13,7 @@
   斗地主 / 斗地主帮助        — 帮助
   上桌 [经典|癞子|不洗牌|极速] — 加入牌桌（凑满3人可含AI）
   下桌                      — 离开牌桌
-  人机                      — 机器人补位补满并开局
-  开局                      — 房主/管理提前开局（不满3人自动AI补位）
+  开局 / 人机 / 开始         — 开局；人不齐自动 AI 补位（1-2 人也能开）
   叫分 N / 不叫             — 叫分阶段
   抢 / 不抢                 — 抢地主阶段
   加倍 / 超级加倍 / 不加倍   — 加倍阶段（×2 / ×4 / 不加倍）
@@ -49,11 +48,11 @@ from .services import render
 from .services.room import Room, RoomManager
 
 PLUGIN_NAME = "astrbot_plugin_doudizhu"
-PLUGIN_VERSION = "v1.2.1"
+PLUGIN_VERSION = "v1.2.2"
 MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
 MODE_ALIASES = {"经典": "classic", "癞子": "leizi", "不洗牌": "noshuffle", "极速": "speed"}
 
-HELP_TEXT = """🃏 斗地主 v1.2.1 —— 完整欢乐斗地主玩法
+HELP_TEXT = """🃏 斗地主 v1.2.2 —— 完整欢乐斗地主玩法
 
 【基本流程】
 1. 发送「上桌」加入牌桌（满 3 人自动开始；不满时可加 AI）
@@ -63,8 +62,7 @@ HELP_TEXT = """🃏 斗地主 v1.2.1 —— 完整欢乐斗地主玩法
 【常用命令】
 · 上桌 [经典|癞子|不洗牌|极速] — 加入（默认经典；不洗牌=炸弹更多💣；极速=20s超时）
 · 下桌            — 退出牌桌
-· 人机            — AI 补位并立刻开局（人不齐也能玩）
-· 开局            — 发起人/管理强制开局
+· 开局 / 人机      — 人齐直接开；人不齐自动 AI 补位
 · 叫分 1/2/3 · 不叫
 · 抢 / 不抢        — 抢地主阶段
 · 加倍 / 超级加倍 / 不加倍 — 加倍阶段（普通×2、超级×4）
@@ -302,7 +300,7 @@ class DoudizhuPlugin(Star):
         else:
             yield event.plain_result(
                 f"✅ {name} 坐上牌桌（{n}/3）\n还差 {3 - n} 人，其他朋友发送「上桌」加入；"
-                f"不等了可直接发「人机」让 AI 补位开局～")
+                f"不等了可直接发「开局」让 AI 补位～")
 
     @filter.command("下桌", alias={"不玩了", "退出"})
     async def cmd_leave(self, event: AstrMessageEvent):
@@ -321,17 +319,13 @@ class DoudizhuPlugin(Star):
             return
         yield event.plain_result("你不在牌桌上～")
 
-    @filter.command("人机")
-    async def cmd_bot_fill(self, event: AstrMessageEvent):
-        """AI 补位补满并开局（人机模式）。"""
+    @filter.command("开局", alias={"开始", "人机"})
+    async def cmd_start(self, event: AstrMessageEvent):
+        """开局：人齐直接开；人不齐自动 AI 补位（至少 1 人上桌即可）。"""
         try:
             gid = self._gid(event)
         except ValueError as e:
             yield event.plain_result(str(e))
-            return
-        conf = self.economy.group_conf(gid)
-        if not conf.get("allow_bot", True):
-            yield event.plain_result("本群已禁用 AI 补位～")
             return
         if self._room(gid) is not None:
             yield event.plain_result("🎮 本群已有一局进行中，等这局结束后再开新的吧～")
@@ -340,43 +334,24 @@ class DoudizhuPlugin(Star):
         if not b or not b["uids"]:
             yield event.plain_result("还没有人上桌呢，先发「上桌」吧～")
             return
+        uid = self._uid(event)
+        if uid not in b["uids"] and not (await self._is_group_admin(event)):
+            yield event.plain_result("只有上桌的玩家或群管可以开局哦～")
+            return
+        conf = self.economy.group_conf(gid)
         need = 3 - len(b["uids"])
+        if need > 0 and not conf.get("allow_bot", True):
+            yield event.plain_result("本群已禁用 AI 补位，请等真人补满 3 人～")
+            return
         for _ in range(need):
             idx = len(b["uids"])
             b["uids"].append(f"__bot{idx}__")
             b["names"].append(f"机器人{['甲', '乙', '丙'][idx]}")
         await self._start_game(gid, event)
-        yield event.plain_result(f"🤖 已用 {need} 个机器人补位，开局！")
-
-    @filter.command("开局", alias={"开始"})
-    async def cmd_start(self, event: AstrMessageEvent):
-        try:
-            gid = self._gid(event)
-        except ValueError as e:
-            yield event.plain_result(str(e))
-            return
-        if self._room(gid) is not None:
-            yield event.plain_result("🎮 本群已有一局进行中，等这局结束后再开新的吧～")
-            return
-        b = self.pending.get(gid)
-        if not b or len(b["uids"]) < 2:
-            yield event.plain_result("至少 2 个人上桌才能开局（不足 3 人将用 AI 补位）～")
-            return
-        if not (await self._is_group_admin(event)):
-            # 非管理仅允许发起人（第一个上桌者）
-            if b["uids"][0] != self._uid(event):
-                yield event.plain_result("只有发起人（第一个上桌的）或群管可以提前开局～")
-                return
-        conf = self.economy.group_conf(gid)
-        if not conf.get("allow_bot", True) and len(b["uids"]) < 3:
-            yield event.plain_result("本群已禁用 AI 补位，请等真人补满 3 人～")
-            return
-        while len(b["uids"]) < 3:
-            idx = len(b["uids"])
-            b["uids"].append(f"__bot{idx}__")
-            b["names"].append(f"机器人{['甲', '乙', '丙'][idx]}")
-        await self._start_game(gid, event)
-        yield event.plain_result("🃏 开局！")
+        if need > 0:
+            yield event.plain_result(f"🃏 开局！🤖 已用 {need} 个机器人补位")
+        else:
+            yield event.plain_result("🃏 三人到齐，开局！")
 
     async def _start_game(self, gid: str, event: AstrMessageEvent):
         # 一群一局：已有进行中的对局时拒绝开新局（正常流程不会走到，兜底保护）

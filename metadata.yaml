@@ -1,7 +1,7 @@
 name: astrbot_plugin_doudizhu
 display_name: 斗地主
 desc: 完整欢乐斗地主玩法：乐豆/癞子/人机模式/群内临时会话发牌/群主配置
-version: v1.2.1
+version: v1.2.2
 author: WolfeOvO
 repo: https://github.com/WolfeOvO/astrbot_plugin_doudizhu
 astrbot_version: ">=4.20,<5"
