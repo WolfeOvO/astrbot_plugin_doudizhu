@@ -311,6 +311,8 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
     counts = ctx.get("others_counts") or {}
     landlord_count = ctx.get("landlord_count")
     rng = ctx.get("rng") or random.Random()
+    level = str(ctx.get("difficulty") or "normal")   # easy / normal / hard
+    low_t = 3 if level == "hard" else 2
 
     groups, wilds = _split(hand, wild_ranks)
     nw = len(wilds)
@@ -338,6 +340,10 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
             smallest = C.sort_cards(hand)[0]
             return [smallest]
         scored.sort(key=lambda t: t[0])
+        if level == "easy" and len(scored) > 1 and rng.random() < 0.40:
+            # 新手 AI：偶尔乱出（从次优里随机挑）
+            pool = scored[1:]
+            return pool[rng.randrange(len(pool))][1]
         return scored[0][1]
 
     # 跟牌
@@ -372,9 +378,9 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
     if role == "farmers_side":
         opp_low = False
     if role == "landlord":
-        opp_low = any(v <= 2 for v in counts.values())
+        opp_low = any(v <= low_t for v in counts.values())
     else:
-        opp_low = landlord_count is not None and landlord_count <= 2
+        opp_low = landlord_count is not None and landlord_count <= low_t
 
     if normal:
         scored = []
@@ -406,6 +412,9 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
             scored.append((score, cs, combo))
         scored.sort(key=lambda t: t[0])
         best = scored[0]
+        if level == "easy" and len(scored) > 1 and rng.random() < 0.35:
+            pool = scored[1:]
+            return pool[rng.randrange(len(pool))][1]
         # 明显亏牌（例如拆掉对子纯亏）时，宁可 pass —— 仅当自己是农民且要不起大牌时
         if opp_low and best[2].main < 14 and bombs:
             # 对家快赢，普通牌压不住大牌，考虑炸弹
@@ -417,7 +426,7 @@ def choose_play(hand: Sequence[str], wild_ranks: Set[str], prev: Optional[P.Comb
     if bombs:
         # 无普通牌可压：牌局紧要（对家剩 <=2 或自己 <=5 张）才炸
         bomb_card = _best_bomb(bombs, hand, wild_ranks)
-        urgent = opp_low or len(hand) <= 5
+        urgent = opp_low or len(hand) <= (6 if level == "hard" else 5)
         if urgent and bomb_card is not None:
             return bomb_card[0]
     return None

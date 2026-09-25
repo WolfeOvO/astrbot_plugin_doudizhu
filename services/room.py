@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import os
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -128,11 +130,10 @@ class Room:
             elif g.phase == PH_PLAY:
                 prev = g._prev_combo()
                 if prev is None:
-                    cs = AI.choose_play(p.hand, g.wild_ranks, None, self._ai_ctx(seat))
-                    if not cs:
-                        cs = [C.sort_cards(p.hand)[0]]
+                    # 先手超时：直接出最小单张（简单规则；想智能代打请手动发「托管」）
+                    cs = [C.sort_cards(p.hand)[0]]
                     out = g.play(seat, cs)[1]
-                    action = "托管出牌"
+                    action = f"出牌 {C.fmt_cards(cs)}"
                 else:
                     out = g.pass_turn(seat)
                     action = "不出"
@@ -140,8 +141,16 @@ class Room:
                 return
         except GameError:
             return
-        await self.send_group(f"⏰ {p.name} 思考超时，自动{action}")
+        await self.send_group(f"⏰ 【{p.name}】思考超时，自动{action}")
         await self._after_step(out)
+
+    async def resume_after_reload(self):
+        """热重载/重启后恢复：公告 + 重新布置当前回合。"""
+        g = self.game
+        if g.phase == PH_END:
+            return
+        await self.send_group("🔄 检测到未完成的对局，已自动恢复～")
+        await self._after_step("")
 
     # ------------------------------------------------------------------
     # 流程推进
@@ -156,6 +165,8 @@ class Room:
             "last_role": g.players[g.last_play.seat].role if g.last_play else None,
             "others_counts": {q.seat: len(q.hand) for q in g.players if q.seat != seat},
             "landlord_count": len(g.players[lp].hand) if lp is not None else None,
+            "difficulty": g.difficulty,
+            "rng": g.rng,
         }
 
     async def _after_step(self, out: str):
@@ -163,6 +174,7 @@ class Room:
         g = self.game
         if out:
             await self.send_group(out)
+        self.mgr.save_state()
 
         if g.phase == "redeal":
             await self._redeal()
@@ -181,17 +193,17 @@ class Room:
             else:
                 self.arm_timer()
                 await self.send_hand_to(seat)
-                counts = "\n".join(f"{q.name} {len(q.hand)}张" for q in g.players)
+                counts = "\n".join(f"【{q.name}】 {len(q.hand)}张" for q in g.players)
                 role_txt = "地主" if p.role == "landlord" else "农民"
                 prev = g._prev_combo()
                 if prev is not None:
                     last = next((r for r in reversed(g.history) if r.kind == "play"), None)
-                    who = g.players[last.seat].name if last else ""
-                    need_txt = f"{C.fmt_cards(prev.cards)}（{who}）"
+                    who = f"【{g.players[last.seat].name}】" if last else ""
+                    need_txt = f"{C.fmt_cards(prev.cards)}{who}"
                 else:
                     need_txt = "🟢 本轮你先出（自由出牌）"
                 await self.send_group(
-                    f"🎯 轮到 {p.name}（{role_txt}）出牌（{self.conf.get('timeout', 45)}s）\n\n"
+                    f"🎯 轮到 【{p.name}】（{role_txt}）出牌（{self.conf.get('timeout', 45)}s）\n\n"
                     f"📊 剩牌：\n{counts}\n\n"
                     f"{need_txt}\n\n"
                     f"💬 出牌指令：{pfx}出 xxx\n"
@@ -207,7 +219,7 @@ class Room:
             else:
                 self.arm_timer()
                 await self.send_group(
-                    f"🎲 轮到 {p.name} 叫分（{self.conf.get('timeout', 45)}s）\n\n"
+                    f"🎲 轮到 【{p.name}】 叫分（{self.conf.get('timeout', 45)}s）\n\n"
                     f"💬 操作：\n"
                     f"{pfx}叫分 1 - 叫 1 分\n"
                     f"{pfx}叫分 2 - 叫 2 分\n"
@@ -222,7 +234,7 @@ class Room:
                 else:
                     self.arm_timer()
                     await self.send_group(
-                        f"🔥 轮到 {p.name} 抢地主（{self.conf.get('timeout', 45)}s）\n\n"
+                        f"🔥 轮到 【{p.name}】 抢地主（{self.conf.get('timeout', 45)}s）\n\n"
                         f"💬 操作：\n"
                         f"{pfx}抢 - 抢地主（倍数 ×2）\n"
                         f"{pfx}不抢 - 不抢")
@@ -235,7 +247,7 @@ class Room:
                 else:
                     self.arm_timer()
                     await self.send_group(
-                        f"💰 轮到 {p.name} 加倍（{self.conf.get('timeout', 45)}s）"
+                        f"💰 轮到 【{p.name}】 加倍（{self.conf.get('timeout', 45)}s）"
                         f"｜ 当前倍数 ×{g.multiplier}\n\n"
                         f"💬 操作：\n"
                         f"{pfx}加倍 - 加倍（×2）\n"
@@ -309,12 +321,13 @@ class Room:
             self.arm_timer()
             pfx = self.mgr.cmd_prefix
             await self.send_group(
-                f"🎲 轮到 {p.name} 叫分（{conf.get('timeout', 45)}s）\n\n"
+                f"🎲 轮到 【{p.name}】 叫分（{conf.get('timeout', 45)}s）\n\n"
                 f"💬 操作：\n"
                 f"{pfx}叫分 1 - 叫 1 分\n"
                 f"{pfx}叫分 2 - 叫 2 分\n"
                 f"{pfx}叫分 3 - 叫 3 分\n"
                 f"{pfx}不叫 - 本局不叫分")
+        self.mgr.save_state()
 
     async def _finish(self):
         if self.settled:
@@ -323,7 +336,6 @@ class Room:
         self.cancel_timer()
         g = self.game
         try:
-            await self.send_group(g.settlement_text())
             # 乐豆结算 + 战绩（机器人乐豆无限：不入账、不上榜）
             eco: Economy = self.mgr.economy
             deltas = {p.uid: p.score for p in g.players if not p.is_bot}
@@ -332,15 +344,19 @@ class Room:
                 if not p.is_bot:
                     eco.record_game(p.uid, p.is_winner, p.role == "landlord",
                                     g.multiplier, name=p.name)
+            g.balances = {p.uid: eco.beans(p.uid) for p in g.players if not p.is_bot}
+            await self.send_group(g.settlement_text())
             # 结果图
             lines = []
             for p in g.players:
                 role = "地主" if p.role == "landlord" else "农民"
                 if p.is_bot:
-                    lines.append(f"{p.name}（{role}）：∞ 乐豆")
+                    lines.append(f"【{p.name}】（{role}）：∞ 乐豆")
                 else:
-                    lines.append(f"{p.name}（{role}）："
-                                 f"{'+' if p.score >= 0 else ''}{p.score} 乐豆")
+                    bal = g.balances.get(p.uid)
+                    suffix = f" → 余额 {bal}" if bal is not None else ""
+                    lines.append(f"【{p.name}】（{role}）："
+                                 f"{'+' if p.score >= 0 else ''}{p.score} 乐豆{suffix}")
             try:
                 path = render.render_result("对局结束", lines)
                 await self.send_group_image(path)
@@ -368,7 +384,7 @@ class Room:
         prev = g._prev_combo()
         if prev is not None:
             last = next((r for r in reversed(g.history) if r.kind == "play"), None)
-            who = f"（{g.players[last.seat].name}）" if last is not None else ""
+            who = f" 【{g.players[last.seat].name}】" if last is not None else ""
             need = f"⚔️ 需大过：{C.fmt_cards(prev.cards)}{who}"
         elif g.phase == PH_PLAY:
             need = "🟢 本轮你先出（自由出牌）"
@@ -448,6 +464,7 @@ class RoomManager:
         if room is not None and cur is not None and cur is not room:
             return
         self.rooms.pop(gid, None)
+        self.save_state()
 
     def create_room(self, gid: str, players: Sequence[tuple], mode: str,
                     bots: Sequence[bool], msg_origin: str, bot) -> Room:
@@ -457,15 +474,74 @@ class RoomManager:
         conf = self.economy.group_conf(gid)
         if mode == "speed":
             conf = dict(conf, timeout=20)   # 极速场：20 秒超时
-        g = GameState(players, mode=mode, base_per_point=int(conf.get("base", 100)), bots=bots)
+        g = GameState(players, mode=mode, base_per_point=int(conf.get("base", 100)), bots=bots,
+                      cap=int(conf.get("cap", 0) or 0), difficulty=conf.get("difficulty", "normal"))
         room = Room(gid, self, g, conf)
         room.msg_origin = msg_origin
         room.bot = bot
         self.msg_origins[gid] = msg_origin
         self.rooms[gid] = room
+        self.save_state()
         return room
 
     def destroy_room(self, gid: str, reason: str = ""):
         room = self.rooms.pop(gid, None)
         if room:
             room.cancel_timer()
+
+    # ------------------------------------------------------------------
+    # 对局持久化（热更新/重启后恢复房间，避免"指令无效/僵尸对局"）
+    # ------------------------------------------------------------------
+    def _state_path(self) -> str:
+        return os.path.join(os.path.dirname(self.economy.path), "rooms.json")
+
+    def save_state(self):
+        try:
+            rooms = {}
+            for gid, room in self.rooms.items():
+                if room.game.phase in ("ended",):
+                    continue
+                rooms[gid] = {
+                    "game": room.game.to_dict(),
+                    "msg_origin": room.msg_origin,
+                    "conf": dict(room.conf),
+                    "deadline": room.deadline,
+                }
+            path = self._state_path()
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(rooms, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning(f"[斗地主] 保存对局状态失败: {e}")
+
+    def load_state(self) -> int:
+        """启动时恢复未完成的房间。返回恢复数量。"""
+        path = self._state_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return 0
+        n = 0
+        for gid, item in (data or {}).items():
+            try:
+                g = GameState.from_dict(item["game"])
+                conf = item.get("conf") or self.economy.group_conf(gid)
+                room = Room(gid, self, g, conf)
+                room.msg_origin = item.get("msg_origin") or self.msg_origins.get(gid)
+                room.deadline = float(item.get("deadline") or 0)
+                if room.msg_origin:
+                    self.msg_origins[gid] = room.msg_origin
+                self.rooms[gid] = room
+                n += 1
+            except Exception as e:
+                logger.warning(f"[斗地主] 恢复房间失败 {gid}: {e}")
+        return n
+
+    def clear_state(self):
+        try:
+            if os.path.exists(self._state_path()):
+                os.remove(self._state_path())
+        except OSError:
+            pass

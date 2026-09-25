@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from . import cards as C
@@ -45,12 +45,24 @@ class PlayRecord:
     combo: Optional[P.Combo] = None
     cards: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> dict:
+        return {"seat": self.seat, "kind": self.kind,
+                "combo": self.combo.to_dict() if self.combo else None,
+                "cards": list(self.cards)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PlayRecord":
+        combo = P.Combo.from_dict(d["combo"]) if d.get("combo") else None
+        return cls(seat=int(d["seat"]), kind=d["kind"], combo=combo,
+                   cards=list(d.get("cards") or []))
+
 
 def _role_txt(p: PlayerState) -> str:
     return "地主" if p.role == "landlord" else "农民"
 
 
 _MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
+_DIFF_NAMES = {"easy": "新手场", "normal": "标准场", "hard": "大师场"}
 
 
 def _noshuffle_deck(rng: random.Random) -> List[str]:
@@ -79,7 +91,8 @@ class GameState:
     def __init__(self, uids_names: Sequence[Tuple[str, str]], mode: str = "classic",
                  base_per_point: int = 100, rng: Optional[random.Random] = None,
                  bomb_multiplier: bool = True, spring_enabled: bool = True,
-                 bots: Optional[Sequence[bool]] = None):
+                 bots: Optional[Sequence[bool]] = None,
+                 cap: int = 0, difficulty: str = "normal"):
         if len(uids_names) != 3:
             raise GameError("需要恰好 3 名玩家")
         rng = rng or random.Random()
@@ -88,6 +101,10 @@ class GameState:
         self.base_per_point = int(base_per_point)  # 每 1 分 = 多少乐豆
         self.bomb_multiplier = bomb_multiplier
         self.spring_enabled = spring_enabled
+        self.cap = int(cap or 0)              # 输赢封顶（0=不封顶）
+        self.difficulty = difficulty or "normal"   # easy / normal / hard
+        self.stake = 0                        # 最近一次结算基数
+        self.capped = False                   # 本次结算是否触发封顶
 
         self.players: List[PlayerState] = []
         for i, (uid, name) in enumerate(uids_names):
@@ -152,12 +169,12 @@ class GameState:
         self._bid_turns_done += 1
         if points == 0:
             self.log.append(f"{name} 不叫")
-            msg = f"😶 {name} 不叫"
+            msg = f"😶 【{name}】 不叫"
         else:
             self._bid_current = points
             self._bid_winner = seat
             self.log.append(f"{name} 叫 {points} 分")
-            msg = f"🎲 {name} 叫 {points} 分！"
+            msg = f"🎲 【{name}】 叫 {points} 分！"
             if points == 3:
                 return self._enter_grab(msg)
         # 继续 / 结束叫分
@@ -201,10 +218,10 @@ class GameState:
             self._grab_any = True
             self.multiplier *= 2
             self.log.append(f"{name} 抢地主（倍数 x2 → {self.multiplier}）")
-            msg = f"🔥 {name} 抢地主！倍数 ×2（当前 ×{self.multiplier}）"
+            msg = f"🔥 【{name}】 抢地主！倍数 ×2（当前 ×{self.multiplier}）"
         else:
             self.log.append(f"{name} 不抢")
-            msg = f"🙅 {name} 不抢"
+            msg = f"🙅 【{name}】 不抢"
         if not self._grab_queue:
             if self._grab_any and not self._grab_caller_asked and self._grab_caller is not None \
                     and self._grab_caller != self._bid_winner:
@@ -250,10 +267,10 @@ class GameState:
             label = "超级加倍" if factor == 4 else "加倍"
             icon = "💎" if factor == 4 else "💰"
             self.log.append(f"{name} {label}（倍数 x{factor} → {self.multiplier}）")
-            msg = f"{icon} {name} {label}！倍数 ×{factor}（当前 ×{self.multiplier}）"
+            msg = f"{icon} 【{name}】 {label}！倍数 ×{factor}（当前 ×{self.multiplier}）"
         else:
             self.log.append(f"{name} 不加倍")
-            msg = f"😐 {name} 不加倍"
+            msg = f"😐 【{name}】 不加倍"
         if not self._double_queue:
             return self._start_play(msg)
         return msg
@@ -336,10 +353,10 @@ class GameState:
         # 胜利判定
         if not p.hand:
             self._settle(winner_seat=seat)
-            return combo, f"🎉 {p.name}（{role_txt}）出完了最后 {len(cards)} 张牌！"
+            return combo, f"🎉 【{p.name}】（{role_txt}）出完了最后 {len(cards)} 张牌！"
         self.current = (seat + 1) % 3
-        counts = "\n".join(f"{q.name} {len(q.hand)}张" for q in self.players)
-        return combo, (f"🃏 {p.name}（{role_txt}）\n"
+        counts = "\n".join(f"【{q.name}】 {len(q.hand)}张" for q in self.players)
+        return combo, (f"🃏 【{p.name}】（{role_txt}）\n"
                        f"出 {combo.text()}{bomb_line}\n\n"
                        f"📊 剩牌：\n{counts}")
 
@@ -371,10 +388,10 @@ class GameState:
             self.last_play = None
             self.pass_count = 0
             self.log.append(f"两家不出，{self.players[last.seat].name} 重新出牌")
-            return (f"💨 {p.name}（{role_txt}）不出 → 🔄 两家不出，"
-                    f"{self.players[last.seat].name} 重新出牌")
+            return (f"💨 【{p.name}】（{role_txt}）不出 → 🔄 两家不出，"
+                    f"【{self.players[last.seat].name}】 重新出牌")
         self.current = (seat + 1) % 3
-        return f"💨 {p.name}（{role_txt}）不出"
+        return f"💨 【{p.name}】（{role_txt}）不出"
 
     # ------------------------------------------------------------------
     # 结算
@@ -396,16 +413,20 @@ class GameState:
                     self.spring_type = "anti"
                     self.multiplier *= 2
         stake = self.base_points * self.multiplier * self.base_per_point
+        self.stake = stake
         for p in self.players:
             if p.role == "landlord":
                 p.score = stake * 2 if landlord_won else -stake * 2
             else:
                 p.score = -stake if landlord_won else stake
+            if self.cap and abs(p.score) > self.cap:
+                p.score = self.cap if p.score > 0 else -self.cap
+                self.capped = True
             if p.role == ("landlord" if landlord_won else "farmer"):
                 p.is_winner = True
         self.log.append(f"对局结束：{'地主' if landlord_won else '农民'}获胜，"
                         f"基础分 {self.base_points}，倍数 x{self.multiplier}，"
-                        f"结算基数 {stake} 乐豆")
+                        f"结算基数 {stake} 乐豆" + ("（封顶）" if self.capped else ""))
         if self.spring_type == "spring":
             self.log.append("春天！倍数翻倍")
         elif self.spring_type == "anti":
@@ -417,8 +438,16 @@ class GameState:
         lines = []
         lw = self.players[self.landlord].is_winner if self.landlord is not None else False
         lines.append(f"🏁 本局结束 —— {'👑 地主' if lw else '🌾 农民'}胜利！")
-        lines.append(f"📈 底分 {self.base_points} × 总倍数 ×{self.multiplier}"
-                     f"（炸弹 {self.bomb_count} 个）")
+        diff = _DIFF_NAMES.get(self.difficulty, "")
+        lines.append(f"🎲 {_MODE_NAMES.get(self.mode, self.mode)} · {diff}｜"
+                     f"底分 {self.base_points} × 倍数 {self.multiplier} × {self.base_per_point}")
+        lines.append(f"💰 结算基数：{self.base_points} × {self.multiplier} × {self.base_per_point}"
+                     f" = {self.stake} 乐豆（{'地主×2 / 农民×1' if self.landlord is not None else ''}）")
+        if self.cap:
+            if self.capped:
+                lines.append(f"🛡️ 封顶生效：单人最多输赢 {self.cap} 乐豆（超出部分不计）")
+            else:
+                lines.append(f"🛡️ 封顶 {self.cap} 乐豆（本局未触发）")
         if self.spring_type == "spring":
             lines.append("🌸 春天！倍数再翻倍")
         elif self.spring_type == "anti":
@@ -427,11 +456,13 @@ class GameState:
         for p in self.players:
             role = _role_txt(p)
             if p.is_bot:
-                lines.append(f"· 🤖 {p.name}（{role}）：∞ 乐豆")
+                lines.append(f"· 🤖 【{p.name}】（{role}）：∞ 乐豆")
             else:
                 delta = f"+{p.score}" if p.score >= 0 else str(p.score)
                 icon = "🎉" if p.is_winner else "😢"
-                lines.append(f"· {icon} {p.name}（{role}）：{delta} 乐豆")
+                bal = getattr(self, "balances", {}).get(p.uid)
+                tail = f"（余额 {bal}）" if bal is not None else ""
+                lines.append(f"· {icon} 【{p.name}】（{role}）：{delta} 乐豆{tail}")
         return "\n".join(lines)
 
     def score_deltas(self) -> Dict[str, int]:
@@ -459,3 +490,76 @@ class GameState:
             "others": others, "multiplier": self.multiplier,
             "wild": next(iter(self.wild_ranks)) if self.wild_ranks else None,
         }
+
+    # ------------------------------------------------------------------
+    # 序列化（对局持久化：热更新/重启后恢复）
+    # ------------------------------------------------------------------
+    def to_dict(self) -> dict:
+        return {
+            "players": [vars(p) for p in self.players],
+            "mode": self.mode, "base_per_point": self.base_per_point,
+            "bomb_multiplier": self.bomb_multiplier, "spring_enabled": self.spring_enabled,
+            "cap": self.cap, "difficulty": self.difficulty,
+            "wild_ranks": sorted(self.wild_ranks), "bottom": list(self.bottom),
+            "phase": self.phase, "base_points": self.base_points,
+            "multiplier": self.multiplier, "bomb_count": self.bomb_count,
+            "spring_type": self.spring_type, "first_bidder": self.first_bidder,
+            "_bid_turn": self._bid_turn, "_bid_turns_done": self._bid_turns_done,
+            "_bid_current": self._bid_current, "_bid_winner": self._bid_winner,
+            "landlord": self.landlord, "_grab_turn": self._grab_turn,
+            "_grab_queue": list(self._grab_queue), "_grab_caller": self._grab_caller,
+            "_grab_caller_asked": self._grab_caller_asked, "_grab_any": self._grab_any,
+            "_double_queue": list(self._double_queue), "current": self.current,
+            "last_play": self.last_play.to_dict() if self.last_play else None,
+            "pass_count": self.pass_count,
+            "history": [r.to_dict() for r in self.history],
+            "log": self.log[-60:],
+            "started_at": self.started_at, "ended_at": self.ended_at,
+            "_bombed_seats": {str(k): v for k, v in self._bombed_seats.items()},
+            "stake": self.stake, "capped": self.capped,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GameState":
+        g = cls.__new__(cls)
+        known = {f.name for f in _dc_fields(PlayerState)}
+        g.players = [PlayerState(**{k: v for k, v in p.items() if k in known})
+                     for p in d["players"]]
+        g.mode = d.get("mode", "classic")
+        g.base_per_point = int(d.get("base_per_point", 100))
+        g.bomb_multiplier = bool(d.get("bomb_multiplier", True))
+        g.spring_enabled = bool(d.get("spring_enabled", True))
+        g.cap = int(d.get("cap", 0) or 0)
+        g.difficulty = d.get("difficulty", "normal")
+        g.wild_ranks = set(d.get("wild_ranks") or [])
+        g.bottom = list(d.get("bottom") or [])
+        g.phase = d.get("phase", PH_BID)
+        g.base_points = int(d.get("base_points", 0))
+        g.multiplier = int(d.get("multiplier", 1))
+        g.bomb_count = int(d.get("bomb_count", 0))
+        g.spring_type = d.get("spring_type", "")
+        g.first_bidder = int(d.get("first_bidder", 0))
+        g._bid_turn = int(d.get("_bid_turn", 0))
+        g._bid_turns_done = int(d.get("_bid_turns_done", 0))
+        g._bid_current = int(d.get("_bid_current", 0))
+        g._bid_winner = d.get("_bid_winner")
+        g.landlord = d.get("landlord")
+        g._grab_turn = d.get("_grab_turn")
+        g._grab_queue = list(d.get("_grab_queue") or [])
+        g._grab_caller = d.get("_grab_caller")
+        g._grab_caller_asked = bool(d.get("_grab_caller_asked", False))
+        g._grab_any = bool(d.get("_grab_any", False))
+        g._double_queue = list(d.get("_double_queue") or [])
+        g.current = d.get("current")
+        lp = d.get("last_play")
+        g.last_play = PlayRecord.from_dict(lp) if lp else None
+        g.pass_count = int(d.get("pass_count", 0))
+        g.history = [PlayRecord.from_dict(r) for r in (d.get("history") or [])]
+        g.log = list(d.get("log") or [])
+        g.started_at = float(d.get("started_at") or time.time())
+        g.ended_at = d.get("ended_at")
+        g._bombed_seats = {int(k): v for k, v in (d.get("_bombed_seats") or {}).items()}
+        g.stake = int(d.get("stake", 0))
+        g.capped = bool(d.get("capped", False))
+        g.rng = random.Random()
+        return g

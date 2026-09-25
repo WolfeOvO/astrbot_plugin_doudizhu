@@ -287,8 +287,85 @@ def test_noshuffle_and_auto():
     g2.players[1].play_count = 5   # 避免反春天
     g2._settle(winner_seat=2)
     txt = g2.settlement_text()
-    check("托管人显示实际乐豆", "KD（农民）：+100 乐豆" in txt, txt)
+    check("托管人显示实际乐豆", "【KD】（农民）：+100 乐豆" in txt, txt)
     check("机器人仍显示 ∞", txt.count("∞ 乐豆") == 2, txt)
+
+
+def test_cap_and_serialize():
+    print("[封顶 + 序列化恢复 + 难度]")
+    rng = random.Random(3)
+    # 封顶：小额场景算 100，封顶 50 → 每人 ±50
+    g = GameState([("u0", "A"), ("u1", "B"), ("u2", "C")], mode="classic",
+                  rng=rng, cap=50)
+    g.bid(g.bid_turn, 1)
+    g.bid(g.bid_turn, 0)
+    g.bid(g.bid_turn, 0)
+    g.grab(g.grab_turn, False)
+    g.grab(g.grab_turn, False)
+    g.double(g.double_turn, 0)
+    g.double(g.double_turn, 0)
+    g.double(g.double_turn, 0)
+    g.players[g.landlord].play_count = 5
+    g._settle(winner_seat=(g.landlord + 1) % 3)
+    check("封顶生效", g.capped and max(abs(p.score) for p in g.players) == 50,
+          str([p.score for p in g.players]))
+    check("封顶文案", "封顶" in g.settlement_text(), g.settlement_text())
+
+    # 序列化 roundtrip：任意局面保存/恢复后一致
+    rng2 = random.Random(9)
+    g2 = GameState([("u0", "A"), ("u1", "B"), ("u2", "C")], mode="leizi",
+                   rng=rng2, bots=[False, True, True], cap=500, difficulty="hard")
+    g2.bid(g2.bid_turn, 2)
+    g2.bid(g2.bid_turn, 0)
+    g2.bid(g2.bid_turn, 0)
+    g2.grab(g2.grab_turn, True)
+    d = g2.to_dict()
+    g3 = GameState.from_dict(d)
+    check("序列化 phase", g3.phase == g2.phase, f"{g3.phase} != {g2.phase}")
+    check("序列化 hands", [p.hand for p in g3.players] == [p.hand for p in g2.players])
+    check("序列化 wild", g3.wild_ranks == g2.wild_ranks)
+    check("序列化 cap/difficulty", g3.cap == 500 and g3.difficulty == "hard")
+    check("序列化 grab 状态", g3._grab_queue == g2._grab_queue and g3._grab_turn == g2._grab_turn)
+    # 恢复后继续走完一局（AI 驱动）
+    import time as _t
+    steps = 0
+    while g3.phase not in ("ended", "redeal") and steps < 500:
+        steps += 1
+        if g3.phase == "bidding":
+            g3.bid(g3.bid_turn, A.suggest_bid(g3.players[g3.bid_turn].hand, g3.wild_ranks, g3._bid_current))
+        elif g3.phase == "grabbing":
+            g3.grab(g3.grab_turn, A.suggest_grab(g3.players[g3.grab_turn].hand, g3.wild_ranks))
+        elif g3.phase == "doubling":
+            g3.double(g3.double_turn, A.suggest_double(g3.players[g3.double_turn].hand, g3.wild_ranks))
+        elif g3.phase == "playing":
+            p = g3.players[g3.current]
+            cs = A.choose_play(p.hand, g3.wild_ranks, g3._prev_combo(),
+                               {"role": p.role or "farmer", "others_counts": {},
+                                "landlord_count": len(g3.players[g3.landlord].hand) if g3.landlord is not None else None,
+                                "difficulty": g3.difficulty, "rng": random.Random(1)})
+            if cs is None:
+                g3.pass_turn(g3.current)
+            else:
+                g3.play(g3.current, cs)
+    check("恢复后能正常打完", g3.phase in ("ended", "redeal"), g3.phase)
+
+    # 难度：easy 用 40% 概率乱出，不至于崩
+    rng3 = random.Random(11)
+    g4 = GameState([("u0", "A"), ("u1", "B"), ("u2", "C")], mode="classic",
+                   rng=rng3, difficulty="easy")
+    g4.bid(g4.bid_turn, 1)
+    g4.bid(g4.bid_turn, 0)
+    g4.bid(g4.bid_turn, 0)
+    g4.grab(g4.grab_turn, False)
+    g4.grab(g4.grab_turn, False)
+    g4.double(g4.double_turn, 0)
+    g4.double(g4.double_turn, 0)
+    g4.double(g4.double_turn, 0)
+    p = g4.players[g4.current]
+    cs = A.choose_play(p.hand, g4.wild_ranks, None,
+                       {"role": p.role, "difficulty": "easy", "rng": random.Random(5),
+                        "others_counts": {}, "landlord_count": 20})
+    check("easy AI 出牌合法", cs is not None and all(c in p.hand for c in cs), str(cs))
 
 
 if __name__ == "__main__":
@@ -296,6 +373,7 @@ if __name__ == "__main__":
     test_grab_none()
     test_super_double_and_messages()
     test_noshuffle_and_auto()
+    test_cap_and_serialize()
     test_illegal_moves()
     test_ai_hint()
     test_fuzz()

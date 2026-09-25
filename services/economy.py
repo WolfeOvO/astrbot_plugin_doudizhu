@@ -38,6 +38,8 @@ DEFAULT_GROUP = {
     "sign_bonus": 500,     # 每日签到基础奖励
     "relief": 500,         # 救济金数额
     "relief_floor": 500,   # 低于此数才能领救济
+    "difficulty": "normal",  # easy(新手) / normal(标准) / hard(大师)
+    "cap": 0,              # 输赢封顶（单人多输赢上限，0=不封顶）
 }
 
 

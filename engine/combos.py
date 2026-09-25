@@ -98,6 +98,16 @@ class Combo:
             return f"{base}：{fmt_cards(self.cards)}"
         return base
 
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "main": self.main, "length": self.length,
+                "cards": list(self.cards), "wild_used": self.wild_used, "tier": self.tier}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Combo":
+        return cls(kind=d["kind"], main=int(d["main"]), length=int(d.get("length", 1)),
+                   cards=list(d.get("cards") or []), wild_used=int(d.get("wild_used", 0)),
+                   tier=int(d.get("tier", T_NONE)))
+
 
 def beats(a: Optional[Combo], b: Optional[Combo]) -> bool:
     """a 能否压过 b。b=None 表示自由出牌（恒 True）。"""

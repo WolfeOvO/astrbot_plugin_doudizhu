@@ -1,9 +1,9 @@
-"""手牌图片渲染（PIL，文泉驿正黑）。"""
+"""手牌/结算图片渲染（PIL，文泉驿正黑）。自适应宽度，不裁切。"""
 from __future__ import annotations
 
 import os
 import tempfile
-from typing import List, Optional, Sequence, Set
+from typing import List, Optional, Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -18,21 +18,12 @@ FONT_CANDIDATES = (
 )
 _resolved_font: str = ""
 
-
-def _font_path() -> str:
-    global _resolved_font
-    if not _resolved_font:
-        for p in FONT_CANDIDATES:
-            if os.path.exists(p):
-                _resolved_font = p
-                break
-    return _resolved_font
-
 # 画布参数
 CARD_W, CARD_H = 96, 134
 CARD_R = 12
 GAP = 8
 PAD = 24
+MAX_IMG_W = 900              # 图片最大宽度（超出自动减少每行张数）
 BG = (26, 115, 72)          # 牌桌绿
 CARD_BG = (255, 255, 255)
 CARD_EDGE = (188, 194, 204)
@@ -44,6 +35,16 @@ WILD_BG = (255, 246, 214)
 _font_cache = {}
 
 
+def _font_path() -> str:
+    global _resolved_font
+    if not _resolved_font:
+        for p in FONT_CANDIDATES:
+            if os.path.exists(p):
+                _resolved_font = p
+                break
+    return _resolved_font
+
+
 def _font(size: int) -> ImageFont.FreeTypeFont:
     if size not in _font_cache:
         fp = _font_path()
@@ -52,6 +53,37 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
         except Exception:
             _font_cache[size] = ImageFont.load_default()
     return _font_cache[size]
+
+
+def _text_w(draw: ImageDraw.ImageDraw, text: str, font) -> int:
+    try:
+        return int(draw.textlength(str(text), font=font))
+    except Exception:
+        return len(str(text)) * 14
+
+
+def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> List[str]:
+    """按像素宽度自动折行（中英混排逐字测量）。"""
+    text = str(text)
+    if _text_w(draw, text, font) <= max_w:
+        return [text]
+    out: List[str] = []
+    cur = ""
+    for ch in text:
+        if _text_w(draw, cur + ch, font) <= max_w:
+            cur += ch
+        else:
+            if cur:
+                out.append(cur)
+            cur = ch
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _measure_ctx() -> tuple:
+    img = Image.new("RGB", (8, 8), BG)
+    return img, ImageDraw.Draw(img)
 
 
 def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, card: str, wild: bool):
@@ -90,19 +122,28 @@ def _draw_card(draw: ImageDraw.ImageDraw, x: int, y: int, card: str, wild: bool)
 
 def render_hand(hand: Sequence[str], wild_rank: Optional[str] = None,
                 title: str = "", subtitle: str = "") -> str:
-    """渲染手牌为 PNG，返回文件路径（调用方负责删除）。"""
+    """渲染手牌为 PNG，返回文件路径（调用方负责删除）。宽度自适应，永不超框。"""
     cards = C.sort_cards(hand)
     n = len(cards)
-    per_row = min(10, max(1, n))
-    rows = (n + per_row - 1) // per_row
+    per_row = max(1, min(max(n, 1), (MAX_IMG_W - PAD * 2 + GAP) // (CARD_W + GAP)))
+    rows = (n + per_row - 1) // per_row or 1
     head_h = 0
     if title:
-        head_h += 46
+        head_h += 50
     if subtitle:
-        head_h += 34
-    footer_h = 40
+        head_h += 38
+    footer_h = 44
 
-    w = PAD * 2 + per_row * CARD_W + (per_row - 1) * GAP
+    probe_img, probe = _measure_ctx()
+    f_title = _font(34)
+    f_sub = _font(24)
+    need_w = PAD * 2
+    if title:
+        need_w = max(need_w, _text_w(probe, title, f_title) + PAD * 2)
+    if subtitle:
+        need_w = max(need_w, _text_w(probe, subtitle, f_sub) + PAD * 2)
+    grid_w = PAD * 2 + per_row * CARD_W + (per_row - 1) * GAP
+    w = max(need_w, grid_w)
     h = PAD * 2 + head_h + rows * CARD_H + (rows - 1) * GAP + footer_h
 
     img = Image.new("RGB", (w, h), BG)
@@ -110,11 +151,11 @@ def render_hand(hand: Sequence[str], wild_rank: Optional[str] = None,
 
     y = PAD
     if title:
-        draw.text((w // 2, y + 8), title, font=_font(34), fill=(255, 255, 255), anchor="ma")
-        y += 46
+        draw.text((w // 2, y + 8), title, font=f_title, fill=(255, 255, 255), anchor="ma")
+        y += 50
     if subtitle:
-        draw.text((w // 2, y + 6), subtitle, font=_font(24), fill=(235, 240, 235), anchor="ma")
-        y += 34
+        draw.text((w // 2, y + 6), subtitle, font=f_sub, fill=(235, 240, 235), anchor="ma")
+        y += 38
 
     for i, card in enumerate(cards):
         r, c = divmod(i, per_row)
@@ -127,7 +168,7 @@ def render_hand(hand: Sequence[str], wild_rank: Optional[str] = None,
     note = f"共 {n} 张"
     if wild_rank:
         note += f"　癞子：{wild_rank}"
-    draw.text((w // 2, h - PAD - 8), note, font=f, fill=(235, 240, 235), anchor="md")
+    draw.text((w // 2, h - PAD - 10), note, font=f, fill=(235, 240, 235), anchor="md")
 
     fd, path = tempfile.mkstemp(prefix="ddz_hand_", suffix=".png", dir="/tmp")
     os.close(fd)
@@ -135,18 +176,32 @@ def render_hand(hand: Sequence[str], wild_rank: Optional[str] = None,
     return path
 
 
-def render_result(title: str, lines: Sequence[str], width: int = 640) -> str:
-    """渲染结算图（可选）。"""
+def render_result(title: str, lines: Sequence[str],
+                  max_width: int = MAX_IMG_W, min_width: int = 420) -> str:
+    """渲染结算图：宽度自适应 + 超长自动折行（不再出现固定宽度裁切）。"""
     f_t = _font(38)
     f_b = _font(28)
-    line_h = 44
-    h = PAD * 2 + 60 + len(lines) * line_h
-    img = Image.new("RGB", (width, h), BG)
+    line_h = 46
+    probe_img, probe = _measure_ctx()
+    inner_max = max_width - PAD * 2 - 16
+
+    wrapped: List[str] = []
+    for ln in lines:
+        wrapped.extend(_wrap(probe, ln, f_b, inner_max))
+
+    w = min_width
+    w = max(w, _text_w(probe, title, f_t) + PAD * 2)
+    for ln in wrapped:
+        w = max(w, _text_w(probe, ln, f_b) + PAD * 2 + 16)
+    w = min(w, max_width)
+
+    h = PAD * 2 + 62 + max(1, len(wrapped)) * line_h
+    img = Image.new("RGB", (w, h), BG)
     draw = ImageDraw.Draw(img)
-    draw.text((width // 2, PAD + 10), title, font=f_t, fill=(255, 255, 255), anchor="ma")
+    draw.text((w // 2, PAD + 8), title, font=f_t, fill=(255, 255, 255), anchor="ma")
     y = PAD + 70
-    for line in lines:
-        draw.text((PAD + 10, y), line, font=f_b, fill=(240, 246, 240))
+    for line in wrapped:
+        draw.text((PAD + 8, y), line, font=f_b, fill=(240, 246, 240))
         y += line_h
     fd, path = tempfile.mkstemp(prefix="ddz_result_", suffix=".png", dir="/tmp")
     os.close(fd)

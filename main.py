@@ -48,16 +48,24 @@ from .services import render
 from .services.room import Room, RoomManager
 
 PLUGIN_NAME = "astrbot_plugin_doudizhu"
-PLUGIN_VERSION = "v1.2.2"
+PLUGIN_VERSION = "v1.3.0"
 MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
 MODE_ALIASES = {"经典": "classic", "癞子": "leizi", "不洗牌": "noshuffle", "极速": "speed"}
+DIFF_NAMES = {"easy": "新手场", "normal": "标准场", "hard": "大师场"}
+DIFF_ALIASES = {"简单": "easy", "新手": "easy", "普通": "normal", "标准": "normal",
+                "困难": "hard", "大师": "hard"}
 
-HELP_TEXT = """🃏 斗地主 v1.2.2 —— 完整欢乐斗地主玩法
+HELP_TEXT = """🃏 斗地主 v1.3.0 —— 完整欢乐斗地主玩法
 
 【基本流程】
 1. 发送「上桌」加入牌桌（满 3 人自动开始；不满时可加 AI）
 2. 叫分 → 抢地主 → 加倍（×2 / 超级加倍×4）→ 出牌
 3. 地主先出，先出完手牌的一方获胜
+
+【游戏设置（群主/管理员）】
+· 设置斗地主 难度 简单|普通|困难 — 新手场/标准场/大师场（AI 强度不同）
+· 设置斗地主 封顶 500          — 单局输赢封顶乐豆（0=不封顶）
+· 设置斗地主 底分 100 / 超时 45 / 模式 癞子 …
 
 【常用命令】
 · 上桌 [经典|癞子|不洗牌|极速] — 加入（默认经典；不洗牌=炸弹更多💣；极速=20s超时）
@@ -70,7 +78,7 @@ HELP_TEXT = """🃏 斗地主 v1.2.2 —— 完整欢乐斗地主玩法
 · 提示            — 不确定出什么？私聊给你答案
 · 托管 / 取消托管  — 交给 AI 代打 / 随时收回自己打
 · 乐豆 · 签到 · 救济金 · 乐豆榜 · 战绩
-· 设置斗地主 <项> <值> — 群主/管理员配置
+· 设置斗地主 <项> <值> — 群主/管理员配置（模式/难度/底分/封顶/超时/人机/开关）
 
 【出牌写法示例】
 出 34567        单顺
@@ -96,6 +104,41 @@ class DoudizhuPlugin(Star):
         self.mgr.cmd_prefix = self._wake_prefix()   # 命令提示文案用（如 #）
         self.pending: Dict[str, dict] = {}      # 上桌缓冲：gid -> {"uids":[], "names":[], "mode":}
         self._lock = asyncio.Lock()
+
+    async def initialize(self):
+        """插件加载后：恢复未完成的对局并重新布置回合。"""
+        try:
+            n = self.mgr.load_state()
+        except Exception as e:
+            logger.warning(f"[斗地主] 恢复对局失败: {e}")
+            return
+        if not n:
+            return
+        logger.info(f"[斗地主] 已恢复 {n} 个未完成的对局")
+
+        async def _resume():
+            await asyncio.sleep(2)
+            for room in list(self.mgr.rooms.values()):
+                try:
+                    await room.resume_after_reload()
+                except Exception as e:
+                    logger.warning(f"[斗地主] 恢复对局提示失败: {e}")
+
+        asyncio.create_task(_resume())
+
+    async def terminate(self):
+        """插件被卸载/热更新前保存状态、停掉所有定时器。"""
+        try:
+            self.mgr.save_state()
+        except Exception:
+            pass
+        for room in list(self.mgr.rooms.values()):
+            try:
+                room.cancel_timer()
+            except Exception:
+                pass
+        self.mgr.rooms.clear()
+        logger.info("[斗地主] 插件已停止，对局状态已保存（重载后自动恢复）")
 
     def _wake_prefix(self) -> str:
         """读取 AstrBot 唤醒前缀（用于轮次提示里的命令示例）。"""
@@ -299,7 +342,7 @@ class DoudizhuPlugin(Star):
             yield event.plain_result("🃏 三人到齐，开局！")
         else:
             yield event.plain_result(
-                f"✅ {name} 坐上牌桌（{n}/3）\n还差 {3 - n} 人，其他朋友发送「上桌」加入；"
+                f"✅ 【{name}】坐上牌桌（{n}/3）\n还差 {3 - n} 人，其他朋友发送「上桌」加入；"
                 f"不等了可直接发「开局」让 AI 补位～")
 
     @filter.command("下桌", alias={"不玩了", "退出"})
@@ -315,7 +358,7 @@ class DoudizhuPlugin(Star):
             i = b["uids"].index(uid)
             b["uids"].pop(i)
             b["names"].pop(i)
-            yield event.plain_result(f"👋 {name} 离开了牌桌（{len(b['uids'])}/3）")
+            yield event.plain_result(f"👋 【{name}】离开了牌桌（{len(b['uids'])}/3）")
             return
         yield event.plain_result("你不在牌桌上～")
 
@@ -375,10 +418,11 @@ class DoudizhuPlugin(Star):
         extra_txt = "（炸弹更多💣）" if g.mode == "noshuffle" else ""
         pfx = self.mgr.cmd_prefix
         await room.send_group(
-            f"🎮 对局开始！{MODE_NAMES.get(g.mode, g.mode)}场{wild_txt}{extra_txt}\n"
-            f"👥 玩家：" + "、".join(f"{p.name}{'(AI)' if p.is_bot else ''}" for p in g.players) +
-            f"\n💰 底分 {conf.get('base', 100)} 乐豆/分 · ⏱️ 超时 {conf.get('timeout', 45)}s\n"
-            f"📩 手牌与「现在的情况」每轮私发 · 不会玩可发「{pfx}斗地主帮助」")
+            f"🎮 对局开始！{MODE_NAMES.get(g.mode, g.mode)}场{DIFF_NAMES.get(g.difficulty, '')}{wild_txt}{extra_txt}\n"
+            f"👥 玩家：" + "、".join(f"【{p.name}】{'(AI)' if p.is_bot else ''}" for p in g.players) +
+            f"\n💰 底分 {conf.get('base', 100)} 乐豆/分 · ⏱️ 超时 {conf.get('timeout', 45)}s" +
+            (f" · 🛡️ 封顶 {conf.get('cap', 0)}" if conf.get("cap") else "") +
+            f"\n📩 手牌与「现在的情况」每轮私发 · 不会玩可发「{pfx}斗地主帮助」")
         await room.broadcast_hands()
         await room._after_step("")
 
@@ -632,11 +676,11 @@ class DoudizhuPlugin(Star):
             return
         p = room.game.players[seat]
         if p.auto:
-            yield event.plain_result(f"🤖 {p.name} 已经在托管中啦～发「取消托管」可收回")
+            yield event.plain_result(f"🤖 【{p.name}】已经在托管中啦～发「取消托管」可收回")
             return
         p.auto = True
         yield event.plain_result(
-            f"🤖 {p.name} 开启托管，本局由机器人代打\n（随时发「取消托管」收回）")
+            f"🤖 【{p.name}】开启托管，本局由机器人代打\n（随时发「取消托管」收回）")
 
     @filter.command("取消托管", alias={"收回托管", "自己打"})
     async def cmd_unauto(self, event: AstrMessageEvent):
@@ -655,7 +699,7 @@ class DoudizhuPlugin(Star):
             return
         p = room.game.players[seat]
         if not p.auto:
-            yield event.plain_result(f"{p.name} 现在没有在托管哦～")
+            yield event.plain_result(f"【{p.name}】现在没有在托管哦～")
             return
         p.auto = False
         g = room.game
@@ -664,7 +708,7 @@ class DoudizhuPlugin(Star):
         if turn == seat:
             room.arm_timer()   # 恢复人类正常超时
         await room.send_hand_to(seat, force=True)
-        yield event.plain_result(f"🔙 {p.name} 收回托管，恢复手动出牌！")
+        yield event.plain_result(f"🔙 【{p.name}】收回托管，恢复手动出牌！")
 
     @filter.command("结束", alias={"解散牌局", "结束牌局"})
     async def cmd_end(self, event: AstrMessageEvent):
@@ -685,7 +729,7 @@ class DoudizhuPlugin(Star):
             return
         room.cancel_timer()
         self.mgr.finish_room(gid, room)
-        yield event.plain_result(f"🛑 {self._name(event)} 结束了本局（流局，不计乐豆）\n"
+        yield event.plain_result(f"🛑 【{self._name(event)}】结束了本局（流局，不计乐豆）\n"
                                  f"重新开局：发送「上桌」")
         event.stop_event()
 
@@ -698,7 +742,7 @@ class DoudizhuPlugin(Star):
         beans = self.economy.beans(uid)
         u = self.economy.user(uid)
         yield event.plain_result(
-            f"💰 {self._name(event)} 的乐豆：{beans}\n"
+            f"💰 【{self._name(event)}】的乐豆：{beans}\n"
             f"战绩：{u['wins']} 胜 {u['losses']} 负（共 {u['games']} 局）\n"
             f"最高倍数：x{u['max_mult']}\n"
             f"签到：{'已签（连签 %d 天）' % u['sign_streak'] if u['last_sign'] == today_str() else '今日未签，发「豆签到」'}"
@@ -733,7 +777,7 @@ class DoudizhuPlugin(Star):
         lines = ["🏆 乐豆排行榜"]
         for i, (uid, u) in enumerate(top, 1):
             shown = u.get("name") or uid
-            lines.append(f"{i}. {shown}：{u.get('beans', 0)} 乐豆（{u.get('wins', 0)} 胜）")
+            lines.append(f"{i}. 【{shown}】：{u.get('beans', 0)} 乐豆（{u.get('wins', 0)} 胜）")
         yield event.plain_result("\n".join(lines))
 
     @filter.command("战绩")
@@ -742,7 +786,7 @@ class DoudizhuPlugin(Star):
         total = max(1, u["games"])
         wr = round(u["wins"] / total * 100)
         yield event.plain_result(
-            f"📊 {self._name(event)} 的斗地主战绩\n"
+            f"📊 【{self._name(event)}】的斗地主战绩\n"
             f"总局数：{u['games']}　胜率：{wr}%\n"
             f"地主胜：{u['landlord_wins']}　农民胜：{u['farmer_wins']}\n"
             f"最高倍数：x{u['max_mult']}　当前乐豆：{u['beans']}")
@@ -763,16 +807,20 @@ class DoudizhuPlugin(Star):
         raw = str(content or "").strip()
         conf = self.economy.group_conf(gid)
         if not raw:
+            cap_txt = f"{conf['cap']} 乐豆" if conf.get("cap") else "不封顶"
             yield event.plain_result(
                 "⚙️ 当前设置：\n"
                 f"· 模式：{MODE_NAMES.get(conf['mode'], conf['mode'])}\n"
+                f"· 难度：{DIFF_NAMES.get(conf.get('difficulty', 'normal'), conf.get('difficulty'))}\n"
                 f"· 底分：{conf['base']} 乐豆/分\n"
+                f"· 封顶：{cap_txt}\n"
                 f"· 超时：{conf['timeout']}s\n"
                 f"· AI 补位：{'允许' if conf['allow_bot'] else '禁止'}\n"
                 f"· 入场门槛：{conf['min_beans']} 乐豆\n"
                 f"· 签到奖励：{conf['sign_bonus']} 乐豆\n\n"
                 "修改示例：\n"
-                "设置斗地主 模式 癞子\n设置斗地主 底分 50\n设置斗地主 超时 60\n"
+                "设置斗地主 模式 癞子\n设置斗地主 难度 简单\n设置斗地主 底分 50\n"
+                "设置斗地主 封顶 500\n设置斗地主 超时 60\n"
                 "设置斗地主 人机 关\n设置斗地主 开关 关")
             return
         parts = raw.replace("　", " ").split()
@@ -782,7 +830,9 @@ class DoudizhuPlugin(Star):
         k, v = parts[0], parts[1]
         mapping = {
             "模式": ("mode", MODE_ALIASES),
+            "难度": ("difficulty", DIFF_ALIASES),
             "底分": ("base", None),
+            "封顶": ("cap", None),
             "超时": ("timeout", None),
             "人机": ("allow_bot", {"开": True, "关": False, "允许": True, "禁止": False}),
             "开关": ("enabled", {"开": True, "关": False}),
