@@ -34,6 +34,7 @@ from typing import Dict, Optional
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import llm_tool
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
@@ -48,14 +49,25 @@ from .services import render
 from .services.room import Room, RoomManager
 
 PLUGIN_NAME = "astrbot_plugin_doudizhu"
-PLUGIN_VERSION = "v1.3.0"
+PLUGIN_VERSION = "v1.3.1"
 MODE_NAMES = {"classic": "经典", "leizi": "癞子", "noshuffle": "不洗牌", "speed": "极速"}
 MODE_ALIASES = {"经典": "classic", "癞子": "leizi", "不洗牌": "noshuffle", "极速": "speed"}
 DIFF_NAMES = {"easy": "新手场", "normal": "标准场", "hard": "大师场"}
 DIFF_ALIASES = {"简单": "easy", "新手": "easy", "普通": "normal", "标准": "normal",
                 "困难": "hard", "大师": "hard"}
+CFG_MAPPING = {
+    "模式": ("mode", MODE_ALIASES),
+    "难度": ("difficulty", DIFF_ALIASES),
+    "底分": ("base", None),
+    "封顶": ("cap", None),
+    "超时": ("timeout", None),
+    "人机": ("allow_bot", {"开": True, "关": False, "允许": True, "禁止": False}),
+    "开关": ("enabled", {"开": True, "关": False}),
+    "门槛": ("min_beans", None),
+    "签到": ("sign_bonus", None),
+}
 
-HELP_TEXT = """🃏 斗地主 v1.3.0 —— 完整欢乐斗地主玩法
+HELP_TEXT = """🃏 斗地主 v1.3.1 —— 完整欢乐斗地主玩法
 
 【基本流程】
 1. 发送「上桌」加入牌桌（满 3 人自动开始；不满时可加 AI）
@@ -87,7 +99,11 @@ HELP_TEXT = """🃏 斗地主 v1.3.0 —— 完整欢乐斗地主玩法
 出 三连对 或 334455
 出 飞机带单 33344457
 出 王炸
-（花色可省略，癞子场只需说点数；每轮轮到你时也会贴出可用指令）"""
+（花色可省略，癞子场只需说点数；每轮轮到你时也会贴出可用指令）
+
+【@机器人 自然语言】
+不用记命令：直接 @机器人 说「开一局斗地主」「我的乐豆」「看排行榜」等即可；
+改设置（如「设置斗地主 难度困难」）需群主/管理员。"""
 
 
 @register(PLUGIN_NAME, "Wolfe", "斗地主：完整欢乐斗地主玩法（乐豆/癞子/人机模式/群内发牌）", PLUGIN_VERSION,
@@ -554,7 +570,7 @@ class DoudizhuPlugin(Star):
     # 出牌
     # ==================================================================
     @filter.command("出", alias={"出牌", "打"})
-    async def cmd_play(self, event: AstrMessageEvent, content: GreedyStr = None):
+    async def cmd_play(self, event: AstrMessageEvent, content: GreedyStr):
         try:
             gid = self._gid(event)
         except ValueError:
@@ -736,17 +752,20 @@ class DoudizhuPlugin(Star):
     # ==================================================================
     # 经济系统
     # ==================================================================
-    @filter.command("乐豆")
-    async def cmd_beans(self, event: AstrMessageEvent):
+    def _beans_text(self, event: AstrMessageEvent) -> str:
         uid = self._uid(event)
         beans = self.economy.beans(uid)
         u = self.economy.user(uid)
-        yield event.plain_result(
+        return (
             f"💰 【{self._name(event)}】的乐豆：{beans}\n"
             f"战绩：{u['wins']} 胜 {u['losses']} 负（共 {u['games']} 局）\n"
             f"最高倍数：x{u['max_mult']}\n"
             f"签到：{'已签（连签 %d 天）' % u['sign_streak'] if u['last_sign'] == today_str() else '今日未签，发「豆签到」'}"
         )
+
+    @filter.command("乐豆")
+    async def cmd_beans(self, event: AstrMessageEvent):
+        yield event.plain_result(self._beans_text(event))
 
     @filter.command("豆签到", alias={"领乐豆"})
     async def cmd_sign(self, event: AstrMessageEvent):
@@ -791,11 +810,44 @@ class DoudizhuPlugin(Star):
             f"地主胜：{u['landlord_wins']}　农民胜：{u['farmer_wins']}\n"
             f"最高倍数：x{u['max_mult']}　当前乐豆：{u['beans']}")
 
+    def _config_text(self, conf: dict) -> str:
+        cap_txt = f"{conf['cap']} 乐豆" if conf.get("cap") else "不封顶"
+        return (
+            "⚙️ 当前设置：\n"
+            f"· 模式：{MODE_NAMES.get(conf['mode'], conf['mode'])}\n"
+            f"· 难度：{DIFF_NAMES.get(conf.get('difficulty', 'normal'), conf.get('difficulty'))}\n"
+            f"· 底分：{conf['base']} 乐豆/分\n"
+            f"· 封顶：{cap_txt}\n"
+            f"· 超时：{conf['timeout']}s\n"
+            f"· AI 补位：{'允许' if conf['allow_bot'] else '禁止'}\n"
+            f"· 入场门槛：{conf['min_beans']} 乐豆\n"
+            f"· 签到奖励：{conf['sign_bonus']} 乐豆\n\n"
+            "修改示例：\n"
+            "设置斗地主 模式 癞子\n设置斗地主 难度 简单\n设置斗地主 底分 50\n"
+            "设置斗地主 封顶 500\n设置斗地主 超时 60\n"
+            "设置斗地主 人机 关\n设置斗地主 开关 关")
+
+    def _cfg_apply(self, gid: str, k: str, v: str) -> tuple:
+        if k not in CFG_MAPPING:
+            return False, f"未知设置项「{k}」，发「设置斗地主」查看可用项"
+        field, conv = CFG_MAPPING[k]
+        try:
+            if conv is not None:
+                if v not in conv:
+                    raise ValueError(f"值应为 {'/'.join(conv)}")
+                val = conv[v]
+            else:
+                val = int(v)
+        except ValueError as e:
+            return False, f"❌ {e}"
+        self.economy.set_group_conf(gid, **{field: val})
+        return True, f"✅ 已设置 {k} = {v}"
+
     # ==================================================================
     # 群配置
     # ==================================================================
     @filter.command("设置斗地主", alias={"斗地主设置"})
-    async def cmd_config(self, event: AstrMessageEvent, content: GreedyStr = None):
+    async def cmd_config(self, event: AstrMessageEvent, content: GreedyStr):
         try:
             gid = self._gid(event)
         except ValueError as e:
@@ -807,55 +859,144 @@ class DoudizhuPlugin(Star):
         raw = str(content or "").strip()
         conf = self.economy.group_conf(gid)
         if not raw:
-            cap_txt = f"{conf['cap']} 乐豆" if conf.get("cap") else "不封顶"
-            yield event.plain_result(
-                "⚙️ 当前设置：\n"
-                f"· 模式：{MODE_NAMES.get(conf['mode'], conf['mode'])}\n"
-                f"· 难度：{DIFF_NAMES.get(conf.get('difficulty', 'normal'), conf.get('difficulty'))}\n"
-                f"· 底分：{conf['base']} 乐豆/分\n"
-                f"· 封顶：{cap_txt}\n"
-                f"· 超时：{conf['timeout']}s\n"
-                f"· AI 补位：{'允许' if conf['allow_bot'] else '禁止'}\n"
-                f"· 入场门槛：{conf['min_beans']} 乐豆\n"
-                f"· 签到奖励：{conf['sign_bonus']} 乐豆\n\n"
-                "修改示例：\n"
-                "设置斗地主 模式 癞子\n设置斗地主 难度 简单\n设置斗地主 底分 50\n"
-                "设置斗地主 封顶 500\n设置斗地主 超时 60\n"
-                "设置斗地主 人机 关\n设置斗地主 开关 关")
+            yield event.plain_result(self._config_text(conf))
             return
         parts = raw.replace("　", " ").split()
         if len(parts) < 2:
             yield event.plain_result("用法：设置斗地主 <项> <值>")
             return
-        k, v = parts[0], parts[1]
-        mapping = {
-            "模式": ("mode", MODE_ALIASES),
-            "难度": ("difficulty", DIFF_ALIASES),
-            "底分": ("base", None),
-            "封顶": ("cap", None),
-            "超时": ("timeout", None),
-            "人机": ("allow_bot", {"开": True, "关": False, "允许": True, "禁止": False}),
-            "开关": ("enabled", {"开": True, "关": False}),
-            "门槛": ("min_beans", None),
-            "签到": ("sign_bonus", None),
-        }
-        if k not in mapping:
-            yield event.plain_result(f"未知设置项「{k}」，发「设置斗地主」查看可用项")
-            return
-        field, conv = mapping[k]
-        try:
-            if conv is not None:
-                if v not in conv:
-                    raise ValueError(f"值应为 {'/'.join(conv)}")
-                val = conv[v]
-            else:
-                val = int(v)
-        except ValueError as e:
-            yield event.plain_result(f"❌ {e}")
-            return
-        self.economy.set_group_conf(gid, **{field: val})
-        yield event.plain_result(f"✅ 已设置 {k} = {v}")
+        _ok, msg = self._cfg_apply(gid, parts[0], parts[1])
+        yield event.plain_result(msg)
 
     @filter.command("斗地主帮助", alias={"斗地主玩法"})
     async def cmd_help(self, event: AstrMessageEvent):
         yield event.plain_result(HELP_TEXT)
+
+    # ==================================================================
+    # LLM 工具（@Bot 自然语言兜底，v1.3.1）
+    # ==================================================================
+    @llm_tool(name="ddz_help")
+    async def tool_help(self, event: AstrMessageEvent):
+        """查询斗地主玩法说明与全部命令（上桌/开局/出牌写法、加倍/癞子规则、乐豆系统）。仅群聊可用。"""
+        return HELP_TEXT
+
+    @llm_tool(name="ddz_get_config")
+    async def tool_get_config(self, event: AstrMessageEvent):
+        """查询本群当前斗地主设置（模式、难度、底分、封顶、超时、人机补位、入场门槛、签到奖励）。仅群聊可用。"""
+        if not event.get_group_id():
+            return "该功能仅群聊可用。"
+        gid = str(event.get_group_id())
+        return self._config_text(self.economy.group_conf(gid))
+
+    @llm_tool(name="ddz_set_config")
+    async def tool_set_config(self, event: AstrMessageEvent, key: str, value: str):
+        """修改本群斗地主设置（仅群主/管理员可用）。
+
+        Args:
+            key (str): 设置项：模式、难度、底分、封顶、超时、人机、开关、门槛、签到
+            value (str): 设置值。难度→简单/普通/困难；模式→经典/癞子/不洗牌/极速；人机、开关→开/关；其余为数字。例如 key="难度" value="困难"
+        """
+        if not event.get_group_id():
+            return "该功能仅群聊可用。"
+        gid = str(event.get_group_id())
+        if not (await self._is_group_admin(event)):
+            return "❌ 只有群主/管理员可以修改斗地主设置。"
+        _ok, msg = self._cfg_apply(gid, str(key).strip(), str(value).strip())
+        return msg
+
+    @llm_tool(name="ddz_my_beans")
+    async def tool_my_beans(self, event: AstrMessageEvent):
+        """查询自己（发起人）的乐豆余额、胜率战绩与今日签到状态。仅群聊可用。"""
+        return self._beans_text(event)
+
+    @llm_tool(name="ddz_leaderboard")
+    async def tool_leaderboard(self, event: AstrMessageEvent):
+        """查询斗地主乐豆排行榜前 10 名（乐豆数、胜场）。仅群聊可用。"""
+        top = self.economy.leaderboard(10)
+        if not top:
+            return "暂无数据～"
+        lines = ["🏆 乐豆排行榜"]
+        for i, (uid, u) in enumerate(top, 1):
+            shown = u.get("name") or uid
+            lines.append(f"{i}. 【{shown}】：{u.get('beans', 0)} 乐豆（{u.get('wins', 0)} 胜）")
+        return "\n".join(lines)
+
+    @llm_tool(name="ddz_sit")
+    async def tool_sit(self, event: AstrMessageEvent, mode: str = ""):
+        """加入斗地主牌桌（上桌）。凑满 3 人自动开局；不足时可让发起人用 ddz_start 让 AI 补位。
+
+        Args:
+            mode (str): 可选玩法：经典/癞子/不洗牌/极速，留空使用本群当前模式
+        """
+        if not event.get_group_id():
+            return "该功能仅群聊可用。"
+        gid = str(event.get_group_id())
+        uid, name = self._uid(event), self._name(event)
+        conf = self.economy.group_conf(gid)
+        if not conf.get("enabled", True):
+            return "本群斗地主未启用（群管理可发「设置斗地主 开关 开」启用）。"
+        room = self._room(gid)
+        if room is not None:
+            if self._seat_of(room, uid) is not None:
+                return f"【{name}】已经在桌上啦～"
+            return "本群已有一局进行中，等结束后再上桌吧～"
+        beans = self.economy.beans(uid)
+        if beans < int(conf.get("min_beans", 100)):
+            return f"乐豆不足（{beans} < {conf.get('min_beans', 100)}），签到或领救济金攒一攒吧～"
+        b = self.pending.setdefault(gid, {"uids": [], "names": [], "mode": conf.get("mode", "classic")})
+        if mode:
+            m = MODE_ALIASES.get(mode.strip())
+            if not m:
+                return "模式可选：经典 / 癞子 / 不洗牌 / 极速"
+            b["mode"] = m
+        if uid in b["uids"]:
+            return f"【{name}】已经坐好啦～还差 {3 - len(b['uids'])} 人"
+        if len(b["uids"]) >= 3:
+            return "桌子满了～"
+        b["uids"].append(uid)
+        b["names"].append(name)
+        n = len(b["uids"])
+        if n == 3:
+            await self._start_game(gid, event)
+            return "🃏 三人到齐，已开局！"
+        return f"✅ 【{name}】坐上牌桌（{n}/3）。还差 {3 - n} 人，可用 ddz_start（或「开局」）让 AI 补位。"
+
+    @llm_tool(name="ddz_start")
+    async def tool_start(self, event: AstrMessageEvent):
+        """开始斗地主对局；人不齐会自动 AI 补位（至少 1 人上桌）。仅群聊可用。"""
+        if not event.get_group_id():
+            return "该功能仅群聊可用。"
+        gid = str(event.get_group_id())
+        if self._room(gid) is not None:
+            return "本群已有一局进行中，等这局结束后再开新的吧～"
+        b = self.pending.get(gid)
+        if not b or not b["uids"]:
+            return "还没有人上桌呢，先让玩家上桌（ddz_sit）吧～"
+        uid = self._uid(event)
+        if uid not in b["uids"] and not (await self._is_group_admin(event)):
+            return "只有上桌的玩家或群管可以开局哦～"
+        conf = self.economy.group_conf(gid)
+        need = 3 - len(b["uids"])
+        if need > 0 and not conf.get("allow_bot", True):
+            return "本群已禁用 AI 补位，请等真人补满 3 人～"
+        for _ in range(need):
+            idx = len(b["uids"])
+            b["uids"].append(f"__bot{idx}__")
+            b["names"].append(f"机器人{['甲', '乙', '丙'][idx]}")
+        await self._start_game(gid, event)
+        return f"🃏 已开局！{'（AI 补位 %d 个）' % need if need > 0 else '（三人到齐）'}"
+
+    @llm_tool(name="ddz_leave")
+    async def tool_leave(self, event: AstrMessageEvent):
+        """离开斗地主牌桌（下桌）。仅群聊可用。"""
+        if not event.get_group_id():
+            return "该功能仅群聊可用。"
+        gid = str(event.get_group_id())
+        uid, name = self._uid(event), self._name(event)
+        b = self.pending.get(gid)
+        if b and uid in b["uids"]:
+            i = b["uids"].index(uid)
+            b["uids"].pop(i)
+            b["names"].pop(i)
+            return f"👋 【{name}】离开了牌桌（{len(b['uids'])}/3）"
+        return "你不在牌桌上～"
